@@ -886,6 +886,50 @@ input, select, textarea { font-family: inherit; }
   font-size: 0.88rem;
 }
 
+/* ===== WALLET BALANCES GRID ===== */
+.wallet-balances-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--spacing-md);
+}
+.wallet-balance-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.wallet-balance-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.wallet-balance-info {
+  min-width: 0;
+}
+.wallet-balance-amount {
+  font-weight: 700;
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wallet-balance-value {
+  margin-top: 2px;
+}
+@media (max-width: 768px) {
+  .wallet-balances-grid { grid-template-columns: 1fr; }
+}
+
 /* ===== ACTIONS GRID ===== */
 .actions-grid {
   display: grid;

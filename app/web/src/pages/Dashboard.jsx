@@ -9,7 +9,7 @@ import CreditTierBadge from '../components/CreditTierBadge';
 import CreditScoreGauge from '../components/CreditScoreGauge';
 import CreditTierRoadmap from '../components/CreditTierRoadmap';
 import { SkeletonDashboard } from '../components/Skeleton';
-import { getUserPosition, getOraclePrices, getReadProvider } from '../utils/contracts';
+import { getUserPosition, getUserDebts, getOraclePrices, getReadProvider, getWBTCBalance, getUSDXBalance, getUserUSDXCollateral } from '../utils/contracts';
 import { calculateAccruedInterest, getAPRForTier, formatAPR } from '../utils/interest';
 import { calculateCreditScore } from '../utils/creditScore';
 import { calculateEarnedYield } from '../utils/supplyYield';
@@ -20,6 +20,9 @@ export default function Dashboard() {
     const { address, isConnected } = useWallet();
     const [position, setPosition] = useState(null);
     const [prices, setPrices] = useState({ ethPrice: 2000, wbtcPrice: 40000 });
+    const [walletBalances, setWalletBalances] = useState({ eth: 0, wbtc: 0, usdx: 0 });
+    const [debts, setDebts] = useState({ usdxDebt: 0n, ethDebt: 0n, wbtcDebt: 0n });
+    const [usdxCollateral, setUsdxCollateral] = useState(0);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
 
@@ -60,12 +63,24 @@ export default function Dashboard() {
         try {
             setLoading(true);
             const provider = getReadProvider();
-            const [pos, oraclePrices] = await Promise.all([
+            const [pos, oraclePrices, userDebts, ethBal, wbtcBal, usdxBal, usdxCol] = await Promise.all([
                 getUserPosition(address, provider),
                 getOraclePrices(provider),
+                getUserDebts(address, provider).catch(() => ({ usdxDebt: 0n, ethDebt: 0n, wbtcDebt: 0n })),
+                provider.getBalance(address),
+                getWBTCBalance(address, provider).catch(() => '0'),
+                getUSDXBalance(address, provider).catch(() => '0'),
+                getUserUSDXCollateral(address, provider).catch(() => '0'),
             ]);
             setPosition(pos);
             setPrices(oraclePrices);
+            setDebts(userDebts);
+            setUsdxCollateral(parseFloat(usdxCol));
+            setWalletBalances({
+                eth: parseFloat(ethers.formatEther(ethBal)),
+                wbtc: parseFloat(wbtcBal),
+                usdx: parseFloat(usdxBal),
+            });
             setError(null);
         } catch (err) {
             console.error('Failed to fetch position:', err);
@@ -82,7 +97,8 @@ export default function Dashboard() {
         const wbtcAmount = parseFloat(ethers.formatUnits(position.wbtcCollateral || 0n, 8));
         const ethValue = ethAmount * prices.ethPrice;
         const wbtcValue = wbtcAmount * prices.wbtcPrice;
-        const totalCollateral = ethValue + wbtcValue;
+        const usdxValue = usdxCollateral; // USDX = $1
+        const totalCollateral = ethValue + wbtcValue + usdxValue;
         const totalBorrowed = parseFloat(ethers.formatEther(position.debtAmount || 0n));
         const maxBorrow = parseFloat(ethers.formatEther(position.maxBorrow || 0n));
         const availableToBorrow = Math.max(0, maxBorrow - totalBorrowed);
@@ -106,7 +122,7 @@ export default function Dashboard() {
 
         const utilizationPct = maxBorrow > 0 ? (totalBorrowed / maxBorrow) * 100 : 0;
 
-        return { totalCollateral, totalBorrowed, availableToBorrow, healthFactor, ethAmount, wbtcAmount, ethValue, wbtcValue, liquidationPrice, utilizationPct, maxBorrow };
+        return { totalCollateral, totalBorrowed, availableToBorrow, healthFactor, ethAmount, wbtcAmount, ethValue, wbtcValue, usdxValue, liquidationPrice, utilizationPct, maxBorrow };
     };
 
     if (loading && !position) {
@@ -180,6 +196,34 @@ export default function Dashboard() {
                                 </div>
                             </div>
                         )}
+                    </div>
+                </div>
+
+                {/* Wallet Balances */}
+                <div className="dashboard-card">
+                    <h3 className="card-title">Account Balances</h3>
+                    <div className="wallet-balances-grid">
+                        <div className="wallet-balance-item">
+                            <div className="wallet-balance-icon" style={{ background: 'rgba(98, 126, 234, 0.15)', color: '#627eea' }}>ETH</div>
+                            <div className="wallet-balance-info">
+                                <div className="wallet-balance-amount mono">{walletBalances.eth.toFixed(4)} ETH</div>
+                                <div className="wallet-balance-value text-xs text-muted">${(walletBalances.eth * prices.ethPrice).toFixed(2)}</div>
+                            </div>
+                        </div>
+                        <div className="wallet-balance-item">
+                            <div className="wallet-balance-icon" style={{ background: 'rgba(247, 147, 26, 0.15)', color: '#f7931a' }}>BTC</div>
+                            <div className="wallet-balance-info">
+                                <div className="wallet-balance-amount mono">{walletBalances.wbtc.toFixed(6)} WBTC</div>
+                                <div className="wallet-balance-value text-xs text-muted">${(walletBalances.wbtc * prices.wbtcPrice).toFixed(2)}</div>
+                            </div>
+                        </div>
+                        <div className="wallet-balance-item">
+                            <div className="wallet-balance-icon" style={{ background: 'rgba(0, 212, 170, 0.15)', color: 'var(--primary)' }}>USD</div>
+                            <div className="wallet-balance-info">
+                                <div className="wallet-balance-amount mono">{walletBalances.usdx.toFixed(2)} USDX</div>
+                                <div className="wallet-balance-value text-xs text-muted">${walletBalances.usdx.toFixed(2)}</div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -292,7 +336,7 @@ export default function Dashboard() {
                         <h3 className="card-title">
                             Collateral <Tooltip term="collateral" />
                         </h3>
-                        {position && (vals.ethAmount > 0 || vals.wbtcAmount > 0) ? (
+                        {position && (vals.ethAmount > 0 || vals.wbtcAmount > 0 || usdxCollateral > 0) ? (
                             <div className="collateral-list">
                                 {vals.ethAmount > 0 && (
                                     <div className="collateral-item">
@@ -310,6 +354,15 @@ export default function Dashboard() {
                                             <div className="collateral-amount">{vals.wbtcAmount.toFixed(6)} WBTC</div>
                                         </div>
                                         <div className="collateral-value">${vals.wbtcValue.toFixed(2)}</div>
+                                    </div>
+                                )}
+                                {usdxCollateral > 0 && (
+                                    <div className="collateral-item">
+                                        <div>
+                                            <div className="collateral-asset">USDX</div>
+                                            <div className="collateral-amount">{usdxCollateral.toFixed(2)} USDX</div>
+                                        </div>
+                                        <div className="collateral-value">${usdxCollateral.toFixed(2)}</div>
                                     </div>
                                 )}
                                 {pledgedAssets.length > 0 && (
@@ -333,13 +386,51 @@ export default function Dashboard() {
                         {position && vals.totalBorrowed > 0 ? (
                             <div className="flex flex-col gap-md">
                                 <div className="borrowing-list">
-                                    <div className="borrowing-item">
-                                        <div>
-                                            <div className="borrowing-asset">USDX</div>
-                                            <div className="borrowing-amount">{vals.totalBorrowed.toFixed(2)} USDX</div>
-                                        </div>
-                                        <div className="borrowing-value">${vals.totalBorrowed.toFixed(2)}</div>
-                                    </div>
+                                    {(() => {
+                                        const usdxDebt = parseFloat(ethers.formatEther(debts.usdxDebt || 0n));
+                                        const ethDebt = parseFloat(ethers.formatEther(debts.ethDebt || 0n));
+                                        const wbtcDebt = parseFloat(ethers.formatUnits(debts.wbtcDebt || 0n, 8));
+                                        return (
+                                            <>
+                                                {usdxDebt > 0 && (
+                                                    <div className="borrowing-item">
+                                                        <div>
+                                                            <div className="borrowing-asset">USDX</div>
+                                                            <div className="borrowing-amount">{usdxDebt.toFixed(2)} USDX</div>
+                                                        </div>
+                                                        <div className="borrowing-value">${usdxDebt.toFixed(2)}</div>
+                                                    </div>
+                                                )}
+                                                {ethDebt > 0 && (
+                                                    <div className="borrowing-item">
+                                                        <div>
+                                                            <div className="borrowing-asset">ETH</div>
+                                                            <div className="borrowing-amount">{ethDebt.toFixed(4)} ETH</div>
+                                                        </div>
+                                                        <div className="borrowing-value">${(ethDebt * prices.ethPrice).toFixed(2)}</div>
+                                                    </div>
+                                                )}
+                                                {wbtcDebt > 0 && (
+                                                    <div className="borrowing-item">
+                                                        <div>
+                                                            <div className="borrowing-asset">WBTC</div>
+                                                            <div className="borrowing-amount">{wbtcDebt.toFixed(6)} WBTC</div>
+                                                        </div>
+                                                        <div className="borrowing-value">${(wbtcDebt * prices.wbtcPrice).toFixed(2)}</div>
+                                                    </div>
+                                                )}
+                                                {usdxDebt === 0 && ethDebt === 0 && wbtcDebt === 0 && (
+                                                    <div className="borrowing-item">
+                                                        <div>
+                                                            <div className="borrowing-asset">Total</div>
+                                                            <div className="borrowing-amount">Debt</div>
+                                                        </div>
+                                                        <div className="borrowing-value">${vals.totalBorrowed.toFixed(2)}</div>
+                                                    </div>
+                                                )}
+                                            </>
+                                        );
+                                    })()}
                                 </div>
                                 {interestInfo && (
                                     <div style={{ padding: '10px 14px', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>

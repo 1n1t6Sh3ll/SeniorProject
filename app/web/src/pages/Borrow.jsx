@@ -9,7 +9,7 @@ import { SkeletonCard } from '../components/Skeleton';
 import { useToast } from '../components/Toast';
 import LoanAgreement from '../components/LoanAgreement';
 import Icon from '../components/Icon';
-import { borrowUSDX, depositETH, depositWBTC, getWBTCBalance, getUserPosition, getOraclePrices, getReadProvider } from '../utils/contracts';
+import { borrowUSDX, borrowETH, borrowWBTC, depositETH, depositWBTC, depositUSDX, getWBTCBalance, getUSDXBalance, getUserPosition, getUserDebts, getOraclePrices, getProtocolReserves, getUserUSDXCollateral, getReadProvider } from '../utils/contracts';
 import { recordBorrow, getAPRForTier, formatAPR, estimateInterest, getAllTierRates } from '../utils/interest';
 import { calculateOriginationFee, calculateTotalBorrowCost } from '../utils/fees';
 import { getAssetCollateralValue, getOwnedAssets } from '../utils/assetPortfolio';
@@ -20,9 +20,11 @@ export default function Borrow() {
     const toast = useToast();
 
     const [amount, setAmount] = useState('');
+    const [borrowAsset, setBorrowAsset] = useState('USDX');
     const [loading, setLoading] = useState(false);
     const [position, setPosition] = useState(null);
     const [prices, setPrices] = useState({ ethPrice: 2000, wbtcPrice: 40000 });
+    const [reserves, setReserves] = useState({ ethReserve: 0n, wbtcReserve: 0n });
     const [showConfirm, setShowConfirm] = useState(false);
     const [showLoanAgreement, setShowLoanAgreement] = useState(false);
 
@@ -33,6 +35,8 @@ export default function Borrow() {
     const [depositLoading, setDepositLoading] = useState(false);
     const [ethBalance, setEthBalance] = useState('0');
     const [wbtcBalance, setWbtcBalance] = useState('0');
+    const [usdxBalance, setUsdxBalance] = useState('0');
+    const [usdxCollateral, setUsdxCollateral] = useState('0');
 
     useEffect(() => {
         if (isConnected && address) { fetchPosition(); fetchWalletBalances(); }
@@ -41,12 +45,14 @@ export default function Borrow() {
     const fetchPosition = async () => {
         try {
             const provider = getReadProvider();
-            const [pos, oraclePrices] = await Promise.all([
+            const [pos, oraclePrices, res] = await Promise.all([
                 getUserPosition(address, provider),
                 getOraclePrices(provider),
+                getProtocolReserves(provider),
             ]);
             setPosition(pos);
             setPrices(oraclePrices);
+            setReserves(res);
         } catch (error) {
             console.error('Error fetching position:', error);
         }
@@ -55,27 +61,33 @@ export default function Borrow() {
     const fetchWalletBalances = async () => {
         try {
             const provider = getReadProvider();
-            const [ethBal, wbtcBal] = await Promise.all([
+            const [ethBal, wbtcBal, usdxBal, usdxCol] = await Promise.all([
                 provider.getBalance(address),
                 getWBTCBalance(address, provider),
+                getUSDXBalance(address, provider).catch(() => '0'),
+                getUserUSDXCollateral(address, provider).catch(() => '0'),
             ]);
             setEthBalance(ethers.formatEther(ethBal));
             setWbtcBalance(wbtcBal);
+            setUsdxBalance(usdxBal);
+            setUsdxCollateral(usdxCol);
         } catch {}
     };
 
     const handleQuickDeposit = async () => {
         if (!depositAmount || parseFloat(depositAmount) <= 0) { toast.warning('Invalid Amount', 'Enter a valid amount'); return; }
-        const bal = parseFloat(depositAsset === 'ETH' ? ethBalance : wbtcBalance) || 0;
-        if (parseFloat(depositAmount) > bal) { toast.error('Insufficient Balance', `You only have ${bal.toFixed(depositAsset === 'ETH' ? 6 : 8)} ${depositAsset}`); return; }
+        const bal = parseFloat(depositAsset === 'ETH' ? ethBalance : depositAsset === 'WBTC' ? wbtcBalance : usdxBalance) || 0;
+        if (parseFloat(depositAmount) > bal) { toast.error('Insufficient Balance', `You only have ${bal.toFixed(depositAsset === 'WBTC' ? 8 : depositAsset === 'ETH' ? 6 : 2)} ${depositAsset}`); return; }
 
         setDepositLoading(true);
         try {
             const signer = await getSignerFn();
             if (depositAsset === 'ETH') {
                 await depositETH(depositAmount, signer);
-            } else {
+            } else if (depositAsset === 'WBTC') {
                 await depositWBTC(depositAmount, signer);
+            } else {
+                await depositUSDX(depositAmount, signer);
             }
             toast.success('Deposit Successful', `Deposited ${depositAmount} ${depositAsset} as collateral`);
             setDepositAmount('');
@@ -88,18 +100,33 @@ export default function Borrow() {
         }
     };
 
-    const getMaxBorrow = () => {
+    const getMaxBorrowUSD = () => {
         if (!position) return 0;
         const maxBorrow = parseFloat(ethers.formatEther(position.maxBorrow || 0n));
         const debt = parseFloat(ethers.formatEther(position.debtAmount || 0n));
         return Math.max(0, maxBorrow - debt);
     };
 
+    const getMaxBorrow = () => {
+        const maxUSD = getMaxBorrowUSD();
+        if (borrowAsset === 'USDX') return maxUSD;
+        if (borrowAsset === 'ETH') {
+            const reserveETH = parseFloat(ethers.formatEther(reserves.ethReserve || 0n));
+            return Math.min(maxUSD / prices.ethPrice, reserveETH);
+        }
+        if (borrowAsset === 'WBTC') {
+            const reserveWBTC = parseFloat(ethers.formatUnits(reserves.wbtcReserve || 0n, 8));
+            return Math.min(maxUSD / prices.wbtcPrice, reserveWBTC);
+        }
+        return maxUSD;
+    };
+
     const getCollateralValue = () => {
         if (!position) return 0;
         const ethVal = parseFloat(ethers.formatEther(position.ethCollateral || 0n)) * prices.ethPrice;
         const wbtcVal = parseFloat(ethers.formatUnits(position.wbtcCollateral || 0n, 8)) * prices.wbtcPrice;
-        return ethVal + wbtcVal;
+        const usdxVal = parseFloat(usdxCollateral);
+        return ethVal + wbtcVal + usdxVal;
     };
 
     const getDebt = () => {
@@ -109,7 +136,10 @@ export default function Borrow() {
 
     const calculateNewHealthFactor = (borrowAmount) => {
         if (!position || !borrowAmount || parseFloat(borrowAmount) === 0) return 999;
-        const totalDebt = getDebt() + parseFloat(borrowAmount);
+        let addedDebtUSD = parseFloat(borrowAmount);
+        if (borrowAsset === 'ETH') addedDebtUSD *= prices.ethPrice;
+        else if (borrowAsset === 'WBTC') addedDebtUSD *= prices.wbtcPrice;
+        const totalDebt = getDebt() + addedDebtUSD;
         const collateral = getCollateralValue();
         if (totalDebt === 0) return 999;
         return (collateral * 0.75) / totalDebt;
@@ -120,7 +150,7 @@ export default function Borrow() {
         if (!amount || parseFloat(amount) <= 0) { toast.warning('Invalid Amount', 'Please enter a valid amount'); return; }
         if (!position) { toast.error('Error', 'Unable to fetch your position'); return; }
         const max = getMaxBorrow();
-        if (parseFloat(amount) > max) { toast.error('Exceeds Limit', `Cannot borrow more than ${max.toFixed(2)} USDX`); return; }
+        if (parseFloat(amount) > max) { toast.error('Exceeds Limit', `Cannot borrow more than ${max.toFixed(borrowAsset === 'WBTC' ? 6 : 4)} ${borrowAsset}`); return; }
         if (!isConnected) { toast.error('Error', 'Please connect your wallet'); return; }
         setShowLoanAgreement(true);
     };
@@ -130,10 +160,20 @@ export default function Borrow() {
         setLoading(true);
         try {
             const signer = await getSignerFn();
-            const tx = await borrowUSDX(amount, signer);
+            let tx;
+            if (borrowAsset === 'ETH') {
+                tx = await borrowETH(amount, signer);
+            } else if (borrowAsset === 'WBTC') {
+                tx = await borrowWBTC(amount, signer);
+            } else {
+                tx = await borrowUSDX(amount, signer);
+            }
             const txHash = tx?.hash || tx?.transactionHash || '';
-            recordBorrow(address, amount, position?.creditTier || 1);
-            toast.tx('Borrow Successful', `Borrowed ${amount} USDX`, txHash);
+            const borrowValueUSD = borrowAsset === 'ETH' ? parseFloat(amount) * prices.ethPrice
+                : borrowAsset === 'WBTC' ? parseFloat(amount) * prices.wbtcPrice
+                : parseFloat(amount);
+            recordBorrow(address, borrowValueUSD.toString(), position?.creditTier || 1);
+            toast.tx('Borrow Successful', `Borrowed ${amount} ${borrowAsset}`, txHash);
             setAmount('');
             await fetchPosition();
         } catch (err) {
@@ -164,21 +204,25 @@ export default function Borrow() {
     const tier = position.creditTier || 1;
     const apr = getAPRForTier(tier);
     const borrowAmt = parseFloat(amount) || 0;
-    const est30d = borrowAmt > 0 ? estimateInterest(borrowAmt, tier, 30) : null;
-    const est365d = borrowAmt > 0 ? estimateInterest(borrowAmt, tier, 365) : null;
+    const borrowAmtUSD = borrowAsset === 'ETH' ? borrowAmt * prices.ethPrice
+        : borrowAsset === 'WBTC' ? borrowAmt * prices.wbtcPrice : borrowAmt;
+    const est30d = borrowAmtUSD > 0 ? estimateInterest(borrowAmtUSD, tier, 30) : null;
+    const est365d = borrowAmtUSD > 0 ? estimateInterest(borrowAmtUSD, tier, 365) : null;
     const tierRates = getAllTierRates();
 
-    const origFee = calculateOriginationFee(borrowAmt);
-    const totalCost6m = borrowAmt > 0 ? calculateTotalBorrowCost(borrowAmt, tier, 6) : null;
+    const origFee = calculateOriginationFee(borrowAmtUSD);
+    const totalCost6m = borrowAmtUSD > 0 ? calculateTotalBorrowCost(borrowAmtUSD, tier, 6) : null;
+
+    const borrowValueUSD = borrowAsset === 'ETH' ? borrowAmt * prices.ethPrice
+        : borrowAsset === 'WBTC' ? borrowAmt * prices.wbtcPrice : borrowAmt;
 
     const confirmDetails = borrowAmt > 0 ? [
-        { label: 'Borrow Amount', value: `${borrowAmt.toFixed(2)} USDX` },
+        { label: 'Borrow Amount', value: `${borrowAmt.toFixed(borrowAsset === 'WBTC' ? 6 : 4)} ${borrowAsset}` },
+        ...(borrowAsset !== 'USDX' ? [{ label: 'USD Value', value: `$${borrowValueUSD.toFixed(2)}` }] : []),
         { label: 'Origination Fee (0.5%)', value: `$${origFee.toFixed(2)}`, style: { color: 'var(--accent)' } },
         { label: 'Interest Rate (APR)', value: formatAPR(apr) },
         { label: 'Est. Interest (30 days)', value: `$${est30d?.interest.toFixed(2) || '0.00'}` },
-        { label: 'Est. Total Cost (6 months)', value: `$${totalCost6m?.totalCost.toFixed(2) || '0.00'}`, style: { color: 'var(--accent)' } },
         { label: 'New Health Factor', value: newHF >= 999 ? '\u221E' : newHF.toFixed(2), style: { color: hfColor, fontWeight: 700 } },
-        { label: 'Utilization', value: `${maxBorrow > 0 ? ((borrowAmt / (maxBorrow + getDebt())) * 100).toFixed(1) : 0}%` },
     ] : [];
 
     return (
@@ -186,8 +230,8 @@ export default function Borrow() {
             <main className="page-section">
                 <div className="page-container">
                     <div className="page-header">
-                        <h1 className="page-title">Borrow USDX</h1>
-                        <p className="page-subtitle">Borrow stablecoins against your collateral</p>
+                        <h1 className="page-title">Borrow</h1>
+                        <p className="page-subtitle">Borrow USDX, ETH, or WBTC against your collateral</p>
                     </div>
 
                     {/* Collateral Deposit Section */}
@@ -204,7 +248,7 @@ export default function Borrow() {
                             </div>
                             {maxBorrow <= 0 && (
                                 <div className="info-box warning mb-md">
-                                    You need to deposit ETH or WBTC as collateral before you can borrow USDX.
+                                    You need to deposit ETH, WBTC, or USDX as collateral before you can borrow.
                                 </div>
                             )}
                             <div className="flex gap-md items-end">
@@ -213,6 +257,7 @@ export default function Borrow() {
                                     <select className="form-input" value={depositAsset} onChange={e => setDepositAsset(e.target.value)}>
                                         <option value="ETH">ETH</option>
                                         <option value="WBTC">WBTC</option>
+                                        <option value="USDX">USDX</option>
                                     </select>
                                 </div>
                                 <div style={{ flex: 1 }}>
@@ -224,9 +269,9 @@ export default function Borrow() {
                                 </button>
                             </div>
                             <div className="text-xs text-muted mt-sm">
-                                Wallet: {parseFloat(depositAsset === 'ETH' ? ethBalance : wbtcBalance).toFixed(depositAsset === 'ETH' ? 4 : 6)} {depositAsset}
+                                Wallet: {parseFloat(depositAsset === 'ETH' ? ethBalance : depositAsset === 'WBTC' ? wbtcBalance : usdxBalance).toFixed(depositAsset === 'WBTC' ? 6 : depositAsset === 'ETH' ? 4 : 2)} {depositAsset}
                                 {' '}<button type="button" onClick={() => {
-                                    const bal = depositAsset === 'ETH' ? Math.max(0, parseFloat(ethBalance) - 0.01) : parseFloat(wbtcBalance);
+                                    const bal = depositAsset === 'ETH' ? Math.max(0, parseFloat(ethBalance) - 0.01) : depositAsset === 'WBTC' ? parseFloat(wbtcBalance) : parseFloat(usdxBalance);
                                     setDepositAmount(bal > 0 ? bal.toString() : '');
                                 }} style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem' }}>MAX</button>
                             </div>
@@ -236,7 +281,7 @@ export default function Borrow() {
                     <div className="dashboard-grid">
                         <div className="dashboard-card">
                             <div className="flex justify-between items-center mb-md">
-                                <h3 className="card-title" style={{ margin: 0 }}>Borrow USDX</h3>
+                                <h3 className="card-title" style={{ margin: 0 }}>Borrow {borrowAsset}</h3>
                                 {maxBorrow > 0 && !showDeposit && (
                                     <button className="btn btn-secondary btn-sm" onClick={() => { setShowDeposit(true); fetchWalletBalances(); }}>
                                         <Icon name="deposit" size={14} /> Add Collateral
@@ -245,14 +290,35 @@ export default function Borrow() {
                             </div>
                             <form onSubmit={handleBorrowClick} className="flex flex-col gap-lg">
                                 <div className="form-group">
+                                    <label className="form-label">Asset to Borrow</label>
+                                    <div className="flex gap-sm">
+                                        {['USDX', 'ETH', 'WBTC'].map(a => (
+                                            <button key={a} type="button"
+                                                className={`btn ${borrowAsset === a ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                                                style={{ flex: 1 }}
+                                                onClick={() => { setBorrowAsset(a); setAmount(''); }}>
+                                                {a}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    {borrowAsset !== 'USDX' && (
+                                        <div className="text-xs text-muted mt-sm">
+                                            Protocol reserves: {borrowAsset === 'ETH'
+                                                ? `${parseFloat(ethers.formatEther(reserves.ethReserve || 0n)).toFixed(2)} ETH`
+                                                : `${parseFloat(ethers.formatUnits(reserves.wbtcReserve || 0n, 8)).toFixed(4)} WBTC`
+                                            }
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="form-group">
                                     <label className="form-label">Amount to Borrow</label>
                                     <div className="input-group">
-                                        <input type="number" className="form-input" placeholder="0.0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} disabled={loading} />
-                                        <span className="input-addon">USDX</span>
+                                        <input type="number" className="form-input" placeholder="0.0" step={borrowAsset === 'WBTC' ? '0.000001' : '0.01'} value={amount} onChange={(e) => setAmount(e.target.value)} disabled={loading} />
+                                        <span className="input-addon">{borrowAsset}</span>
                                     </div>
                                     <div className="flex justify-between mt-sm text-sm text-muted">
-                                        <span>Available: {maxBorrow.toFixed(2)} USDX</span>
-                                        <button type="button" onClick={() => setAmount(maxBorrow.toFixed(2))} disabled={loading || maxBorrow <= 0}
+                                        <span>Available: {maxBorrow.toFixed(borrowAsset === 'WBTC' ? 6 : borrowAsset === 'ETH' ? 4 : 2)} {borrowAsset}</span>
+                                        <button type="button" onClick={() => setAmount(maxBorrow.toFixed(borrowAsset === 'WBTC' ? 6 : borrowAsset === 'ETH' ? 4 : 2))} disabled={loading || maxBorrow <= 0}
                                             style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', fontWeight: 700, fontSize: '0.85rem' }}>
                                             MAX
                                         </button>
@@ -299,7 +365,7 @@ export default function Borrow() {
                                             </div>
                                             <div className="flex justify-between text-sm mb-sm">
                                                 <span className="text-muted">Daily Interest</span>
-                                                <span className="mono">${(borrowAmt * apr / 365).toFixed(4)}</span>
+                                                <span className="mono">${(borrowAmtUSD * apr / 365).toFixed(4)}</span>
                                             </div>
                                             <div className="flex justify-between text-sm mb-sm">
                                                 <span className="text-muted">30-Day Interest</span>
@@ -314,7 +380,7 @@ export default function Borrow() {
                                 )}
 
                                 <button type="submit" className="btn btn-primary w-full" disabled={loading || !amount || parseFloat(amount) <= 0 || maxBorrow <= 0}>
-                                    {loading ? <><span className="loading"></span> Borrowing...</> : 'Borrow USDX'}
+                                    {loading ? <><span className="loading"></span> Borrowing...</> : `Borrow ${borrowAsset}`}
                                 </button>
                             </form>
                         </div>

@@ -7,7 +7,7 @@ import ConfirmationModal from '../components/ConfirmationModal';
 import CreditTierRoadmap from '../components/CreditTierRoadmap';
 import { SkeletonCard } from '../components/Skeleton';
 import { useToast } from '../components/Toast';
-import { repayUSDX, getUserPosition, getUSDXBalance, getReadProvider } from '../utils/contracts';
+import { repayUSDX, repayETH, repayWBTC, getUserPosition, getUserDebts, getUSDXBalance, getWBTCBalance, getOraclePrices, getReadProvider } from '../utils/contracts';
 import {
     recordRepayment, calculateAccruedInterest, generateRepaymentPlans,
     calculateMinimumPayment, getAPRForTier, formatAPR, getLoanData
@@ -20,9 +20,14 @@ export default function Repay() {
     const toast = useToast();
 
     const [amount, setAmount] = useState('');
+    const [repayAsset, setRepayAsset] = useState('USDX');
     const [loading, setLoading] = useState(false);
     const [position, setPosition] = useState(null);
+    const [debts, setDebts] = useState({ usdxDebt: 0n, ethDebt: 0n, wbtcDebt: 0n });
+    const [prices, setPrices] = useState({ ethPrice: 2000, wbtcPrice: 40000 });
     const [usdxBalance, setUSDXBalance] = useState('0');
+    const [ethBalance, setEthBalance] = useState('0');
+    const [wbtcBalance, setWbtcBalance] = useState('0');
     const [showConfirm, setShowConfirm] = useState(false);
     const [selectedPlan, setSelectedPlan] = useState(null);
 
@@ -33,22 +38,52 @@ export default function Repay() {
     const fetchData = async () => {
         try {
             const provider = getReadProvider();
-            const pos = await getUserPosition(address, provider);
-            const balance = await getUSDXBalance(address, provider);
+            const [pos, userDebts, oraclePrices, usdxBal, ethBal, wbtcBal] = await Promise.all([
+                getUserPosition(address, provider),
+                getUserDebts(address, provider),
+                getOraclePrices(provider),
+                getUSDXBalance(address, provider).catch(() => '0'),
+                provider.getBalance(address),
+                getWBTCBalance(address, provider).catch(() => '0'),
+            ]);
             setPosition(pos);
-            setUSDXBalance(balance);
+            setDebts(userDebts);
+            setPrices(oraclePrices);
+            setUSDXBalance(usdxBal);
+            setEthBalance(ethers.formatEther(ethBal));
+            setWbtcBalance(wbtcBal);
         } catch (error) {
             console.error('Error fetching data:', error);
         }
+    };
+
+    const getDebtForAsset = () => {
+        if (repayAsset === 'ETH') return parseFloat(ethers.formatEther(debts.ethDebt || 0n));
+        if (repayAsset === 'WBTC') return parseFloat(ethers.formatUnits(debts.wbtcDebt || 0n, 8));
+        return parseFloat(ethers.formatEther(debts.usdxDebt || 0n));
+    };
+
+    const getBalanceForAsset = () => {
+        if (repayAsset === 'ETH') return parseFloat(ethBalance);
+        if (repayAsset === 'WBTC') return parseFloat(wbtcBalance);
+        return parseFloat(usdxBalance);
+    };
+
+    const getTotalDebtUSD = () => {
+        const usdx = parseFloat(ethers.formatEther(debts.usdxDebt || 0n));
+        const eth = parseFloat(ethers.formatEther(debts.ethDebt || 0n)) * prices.ethPrice;
+        const wbtc = parseFloat(ethers.formatUnits(debts.wbtcDebt || 0n, 8)) * prices.wbtcPrice;
+        return usdx + eth + wbtc;
     };
 
     const handleRepayClick = (e) => {
         e.preventDefault();
         if (!amount || parseFloat(amount) <= 0) { toast.warning('Invalid Amount', 'Please enter a valid amount'); return; }
         if (!position) { toast.error('Error', 'Unable to fetch your position'); return; }
-        const currentDebt = parseFloat(ethers.formatEther(position.debtAmount || 0n));
-        if (parseFloat(amount) > currentDebt) { toast.error('Exceeds Debt', `Your debt is only ${currentDebt.toFixed(2)} USDX`); return; }
-        if (parseFloat(amount) > parseFloat(usdxBalance)) { toast.error('Insufficient Balance', `You only have ${parseFloat(usdxBalance).toFixed(2)} USDX`); return; }
+        const currentDebt = getDebtForAsset();
+        if (parseFloat(amount) > currentDebt * 1.001) { toast.error('Exceeds Debt', `Your ${repayAsset} debt is only ${currentDebt.toFixed(repayAsset === 'WBTC' ? 6 : 4)} ${repayAsset}`); return; }
+        const balance = getBalanceForAsset();
+        if (parseFloat(amount) > balance) { toast.error('Insufficient Balance', `You only have ${balance.toFixed(repayAsset === 'WBTC' ? 6 : 4)} ${repayAsset}`); return; }
         if (!isConnected) { toast.error('Error', 'Please connect your wallet'); return; }
         setShowConfirm(true);
     };
@@ -58,10 +93,20 @@ export default function Repay() {
         setLoading(true);
         try {
             const signer = await getSignerFn();
-            const tx = await repayUSDX(amount, signer);
+            let tx;
+            if (repayAsset === 'ETH') {
+                tx = await repayETH(amount, signer);
+            } else if (repayAsset === 'WBTC') {
+                tx = await repayWBTC(amount, signer);
+            } else {
+                tx = await repayUSDX(amount, signer);
+            }
             const txHash = tx?.hash || tx?.transactionHash || '';
-            recordRepayment(address, amount);
-            toast.tx('Repayment Successful', `Repaid ${amount} USDX`, txHash);
+            const repayValueUSD = repayAsset === 'ETH' ? parseFloat(amount) * prices.ethPrice
+                : repayAsset === 'WBTC' ? parseFloat(amount) * prices.wbtcPrice
+                : parseFloat(amount);
+            recordRepayment(address, repayValueUSD.toString());
+            toast.tx('Repayment Successful', `Repaid ${amount} ${repayAsset}`, txHash);
             setAmount('');
             await fetchData();
         } catch (err) {
@@ -86,29 +131,42 @@ export default function Repay() {
         );
     }
 
-    const currentDebt = parseFloat(ethers.formatEther(position.debtAmount || 0n));
+    const currentDebt = getDebtForAsset();
+    const totalDebtUSD = getTotalDebtUSD();
     const remainingDebt = Math.max(0, currentDebt - (parseFloat(amount) || 0));
     const repaymentPct = currentDebt > 0 ? ((parseFloat(amount) || 0) / currentDebt) * 100 : 0;
     const tier = position.creditTier || 1;
     const apr = getAPRForTier(tier);
+    const balance = getBalanceForAsset();
 
-    // Interest calculations
-    const interestInfo = calculateAccruedInterest(address, currentDebt, tier);
-    const minPayment = calculateMinimumPayment(currentDebt, apr);
+    // Debt breakdown
+    const usdxDebtAmt = parseFloat(ethers.formatEther(debts.usdxDebt || 0n));
+    const ethDebtAmt = parseFloat(ethers.formatEther(debts.ethDebt || 0n));
+    const wbtcDebtAmt = parseFloat(ethers.formatUnits(debts.wbtcDebt || 0n, 8));
+    const hasMultiDebt = (usdxDebtAmt > 0 ? 1 : 0) + (ethDebtAmt > 0 ? 1 : 0) + (wbtcDebtAmt > 0 ? 1 : 0) > 1;
+
+    // Interest calculations (based on total USD debt)
+    const interestInfo = calculateAccruedInterest(address, totalDebtUSD, tier);
+    const minPayment = calculateMinimumPayment(totalDebtUSD, apr);
     const repayPlans = generateRepaymentPlans(interestInfo.totalOwed, apr);
     const loanData = getLoanData(address);
     const lateFee = calculateLateFee(loanData);
 
+    const repayAmtUSD = repayAsset === 'ETH' ? (parseFloat(amount) || 0) * prices.ethPrice
+        : repayAsset === 'WBTC' ? (parseFloat(amount) || 0) * prices.wbtcPrice
+        : (parseFloat(amount) || 0);
+
     const confirmDetails = [
-        { label: 'Repay Amount', value: `${parseFloat(amount || 0).toFixed(2)} USDX` },
-        { label: 'Remaining Debt', value: `$${remainingDebt.toFixed(2)}` },
+        { label: 'Repay Amount', value: `${parseFloat(amount || 0).toFixed(repayAsset === 'WBTC' ? 6 : 4)} ${repayAsset}` },
+        ...(repayAsset !== 'USDX' ? [{ label: 'USD Value', value: `$${repayAmtUSD.toFixed(2)}` }] : []),
+        { label: `Remaining ${repayAsset} Debt`, value: `${remainingDebt.toFixed(repayAsset === 'WBTC' ? 6 : 4)} ${repayAsset}` },
         { label: 'Repayment Progress', value: `${repaymentPct.toFixed(1)}%` },
     ];
     if (lateFee > 0) {
         confirmDetails.push({ label: 'Late Payment Fee', value: `$${lateFee.toFixed(2)}`, style: { color: 'var(--danger)' } });
     }
     if (repaymentPct >= 100) {
-        confirmDetails.push({ label: 'Status', value: 'Full Repayment - Tier Progress +1', style: { color: 'var(--success)' } });
+        confirmDetails.push({ label: 'Status', value: `Full ${repayAsset} Repayment - Tier Progress +1`, style: { color: 'var(--success)' } });
     }
 
     return (
@@ -117,44 +175,68 @@ export default function Repay() {
                 <div className="page-container">
                     <div className="page-header">
                         <h1 className="page-title">Repay Loan</h1>
-                        <p className="page-subtitle">Repay your USDX debt to improve your health factor</p>
+                        <p className="page-subtitle">Repay your debt to improve your health factor</p>
                     </div>
 
                     <div className="dashboard-grid">
                         <div className="dashboard-card">
-                            <h3 className="card-title">Repay USDX</h3>
+                            <h3 className="card-title">Repay {repayAsset}</h3>
                             <form onSubmit={handleRepayClick} className="flex flex-col gap-lg">
+                                <div className="form-group">
+                                    <label className="form-label">Asset to Repay</label>
+                                    <div className="flex gap-sm">
+                                        {['USDX', 'ETH', 'WBTC'].map(a => {
+                                            const assetDebt = a === 'ETH' ? ethDebtAmt : a === 'WBTC' ? wbtcDebtAmt : usdxDebtAmt;
+                                            return (
+                                                <button key={a} type="button"
+                                                    className={`btn ${repayAsset === a ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                                                    style={{ flex: 1, position: 'relative' }}
+                                                    onClick={() => { setRepayAsset(a); setAmount(''); }}>
+                                                    {a}
+                                                    {assetDebt > 0 && (
+                                                        <span style={{ display: 'block', fontSize: '0.65rem', opacity: 0.7 }}>
+                                                            {assetDebt.toFixed(a === 'WBTC' ? 4 : a === 'ETH' ? 3 : 2)}
+                                                        </span>
+                                                    )}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+
                                 <div className="form-group">
                                     <label className="form-label">Amount to Repay</label>
                                     <div className="input-group">
-                                        <input type="number" className="form-input" placeholder="0.0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} disabled={loading} />
-                                        <span className="input-addon">USDX</span>
+                                        <input type="number" className="form-input" placeholder="0.0" step={repayAsset === 'WBTC' ? '0.000001' : '0.01'} value={amount} onChange={(e) => setAmount(e.target.value)} disabled={loading} />
+                                        <span className="input-addon">{repayAsset}</span>
                                     </div>
                                     <div className="flex justify-between mt-sm text-sm text-muted">
-                                        <span>Debt: {currentDebt.toFixed(2)} USDX</span>
-                                        <button type="button" onClick={() => setAmount(Math.min(currentDebt, parseFloat(usdxBalance)).toFixed(2))} disabled={loading || currentDebt === 0}
+                                        <span>Debt: {currentDebt.toFixed(repayAsset === 'WBTC' ? 6 : repayAsset === 'ETH' ? 4 : 2)} {repayAsset}</span>
+                                        <button type="button" onClick={() => setAmount(Math.min(currentDebt, balance).toFixed(repayAsset === 'WBTC' ? 6 : repayAsset === 'ETH' ? 4 : 2))} disabled={loading || currentDebt === 0}
                                             style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', fontWeight: 700, fontSize: '0.85rem' }}>
                                             PAY ALL
                                         </button>
                                     </div>
                                     <div className="text-xs text-muted mt-sm">
-                                        Balance: {parseFloat(usdxBalance).toFixed(2)} USDX
+                                        Balance: {balance.toFixed(repayAsset === 'WBTC' ? 6 : repayAsset === 'ETH' ? 4 : 2)} {repayAsset}
                                     </div>
                                 </div>
 
                                 {/* Quick amount buttons */}
                                 {currentDebt > 0 && (
                                     <div className="flex gap-sm" style={{ flexWrap: 'wrap' }}>
-                                        <button type="button" className="btn btn-secondary btn-sm" onClick={() => setAmount(minPayment.toFixed(2))} disabled={loading}>
-                                            Min (${minPayment.toFixed(2)})
-                                        </button>
-                                        <button type="button" className="btn btn-secondary btn-sm" onClick={() => setAmount((currentDebt * 0.25).toFixed(2))} disabled={loading}>
+                                        {repayAsset === 'USDX' && (
+                                            <button type="button" className="btn btn-secondary btn-sm" onClick={() => setAmount(minPayment.toFixed(2))} disabled={loading}>
+                                                Min (${minPayment.toFixed(2)})
+                                            </button>
+                                        )}
+                                        <button type="button" className="btn btn-secondary btn-sm" onClick={() => setAmount((currentDebt * 0.25).toFixed(repayAsset === 'WBTC' ? 6 : 4))} disabled={loading}>
                                             25%
                                         </button>
-                                        <button type="button" className="btn btn-secondary btn-sm" onClick={() => setAmount((currentDebt * 0.5).toFixed(2))} disabled={loading}>
+                                        <button type="button" className="btn btn-secondary btn-sm" onClick={() => setAmount((currentDebt * 0.5).toFixed(repayAsset === 'WBTC' ? 6 : 4))} disabled={loading}>
                                             50%
                                         </button>
-                                        <button type="button" className="btn btn-secondary btn-sm" onClick={() => setAmount((currentDebt * 0.75).toFixed(2))} disabled={loading}>
+                                        <button type="button" className="btn btn-secondary btn-sm" onClick={() => setAmount((currentDebt * 0.75).toFixed(repayAsset === 'WBTC' ? 6 : 4))} disabled={loading}>
                                             75%
                                         </button>
                                     </div>
@@ -168,11 +250,17 @@ export default function Repay() {
                                         border: '1px solid rgba(16,185,129,0.2)',
                                     }}>
                                         <div className="flex justify-between text-sm mb-sm">
-                                            <span className="text-muted">Remaining Debt</span>
+                                            <span className="text-muted">Remaining {repayAsset} Debt</span>
                                             <span className="mono font-bold" style={{ fontSize: '1.1rem', color: 'var(--success)' }}>
-                                                ${remainingDebt.toFixed(2)}
+                                                {remainingDebt.toFixed(repayAsset === 'WBTC' ? 6 : 4)} {repayAsset}
                                             </span>
                                         </div>
+                                        {repayAsset !== 'USDX' && (
+                                            <div className="flex justify-between text-sm mb-sm">
+                                                <span className="text-muted">USD Value</span>
+                                                <span className="mono">${repayAmtUSD.toFixed(2)}</span>
+                                            </div>
+                                        )}
                                         <div className="flex justify-between text-sm">
                                             <span className="text-muted">Repayment</span>
                                             <span className="mono font-bold">{repaymentPct.toFixed(1)}%</span>
@@ -184,7 +272,7 @@ export default function Repay() {
                                 )}
 
                                 <button type="submit" className="btn btn-success w-full" disabled={loading || !amount || parseFloat(amount) <= 0 || currentDebt === 0}>
-                                    {loading ? <><span className="loading"></span> Repaying...</> : 'Repay USDX'}
+                                    {loading ? <><span className="loading"></span> Repaying...</> : `Repay ${repayAsset}`}
                                 </button>
                             </form>
                         </div>
@@ -192,15 +280,40 @@ export default function Repay() {
                         <div className="dashboard-card">
                             <h3 className="card-title">Loan Details</h3>
                             <div className="flex flex-col gap-lg">
+                                {/* Per-asset debt breakdown */}
                                 <div>
-                                    <div className="text-sm text-muted mb-sm">Principal Debt</div>
+                                    <div className="text-sm text-muted mb-sm">Total Debt (USD)</div>
                                     <div className="mono font-bold" style={{ fontSize: '1.5rem' }}>
-                                        ${currentDebt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                        ${totalDebtUSD.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                     </div>
                                 </div>
 
+                                {(usdxDebtAmt > 0 || ethDebtAmt > 0 || wbtcDebtAmt > 0) && (
+                                    <div style={{ borderTop: '1px solid var(--border)', paddingTop: 'var(--spacing-lg)' }}>
+                                        <div className="text-xs text-muted mb-md" style={{ textTransform: 'uppercase', letterSpacing: '0.06em' }}>Debt Breakdown</div>
+                                        {usdxDebtAmt > 0 && (
+                                            <div className="flex justify-between text-sm mb-sm">
+                                                <span className="text-muted">USDX</span>
+                                                <span className="mono font-bold">{usdxDebtAmt.toFixed(2)} <span className="text-xs text-muted">(${usdxDebtAmt.toFixed(2)})</span></span>
+                                            </div>
+                                        )}
+                                        {ethDebtAmt > 0 && (
+                                            <div className="flex justify-between text-sm mb-sm">
+                                                <span className="text-muted">ETH</span>
+                                                <span className="mono font-bold">{ethDebtAmt.toFixed(4)} <span className="text-xs text-muted">(${(ethDebtAmt * prices.ethPrice).toFixed(2)})</span></span>
+                                            </div>
+                                        )}
+                                        {wbtcDebtAmt > 0 && (
+                                            <div className="flex justify-between text-sm">
+                                                <span className="text-muted">WBTC</span>
+                                                <span className="mono font-bold">{wbtcDebtAmt.toFixed(6)} <span className="text-xs text-muted">(${(wbtcDebtAmt * prices.wbtcPrice).toFixed(2)})</span></span>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
                                 {/* Interest Accrual Section */}
-                                {currentDebt > 0 && (
+                                {totalDebtUSD > 0 && (
                                     <div style={{ borderTop: '1px solid var(--border)', paddingTop: 'var(--spacing-lg)' }}>
                                         <div className="text-sm text-muted mb-sm">
                                             Accrued Interest <Tooltip term="healthFactor" />
@@ -229,7 +342,7 @@ export default function Repay() {
                                     <div style={{ borderTop: '1px solid var(--border)', paddingTop: 'var(--spacing-lg)' }}>
                                         <div className="text-sm text-muted mb-sm">Late Payment Fee</div>
                                         <div className="mono font-bold" style={{ fontSize: '1.25rem', color: 'var(--danger)' }}>
-                                            ${lateFee.toFixed(2)} USDX
+                                            ${lateFee.toFixed(2)}
                                         </div>
                                         <div className="text-xs text-muted mt-sm">Assessed for exceeding 30-day grace period</div>
                                     </div>
@@ -263,7 +376,7 @@ export default function Repay() {
                     </div>
 
                     {/* Repayment Plans */}
-                    {currentDebt > 0 && repayPlans.length > 0 && (
+                    {totalDebtUSD > 0 && repayPlans.length > 0 && (
                         <div className="dashboard-card mt-lg">
                             <h3 className="card-title">Repayment Plans</h3>
                             <p className="text-sm text-muted mb-lg">Choose a repayment strategy to pay off your loan</p>
@@ -354,7 +467,7 @@ export default function Repay() {
                 onCancel={() => setShowConfirm(false)}
                 title="Confirm Repayment"
                 details={confirmDetails}
-                confirmText="Confirm Repay"
+                confirmText={`Confirm Repay ${repayAsset}`}
                 confirmVariant="primary"
                 loading={loading}
             />

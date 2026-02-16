@@ -4,7 +4,7 @@ import { ethers } from 'ethers';
 import { Link } from 'react-router-dom';
 import Icon from '../components/Icon';
 import TransactionReceipt from '../components/TransactionReceipt';
-import { getTransactionHistory, getUserPosition, getOraclePrices, getReadProvider } from '../utils/contracts';
+import { getTransactionHistory, getUserPosition, getOraclePrices, getUserUSDXCollateral, getReadProvider } from '../utils/contracts';
 import { calculateAccruedInterest } from '../utils/interest';
 import { calculateEarnedYield } from '../utils/supplyYield';
 import { getOwnedAssets, getAssetCollateralValue } from '../utils/assetPortfolio';
@@ -15,6 +15,7 @@ export default function Portfolio() {
     const [loading, setLoading] = useState(false);
     const [position, setPosition] = useState(null);
     const [prices, setPrices] = useState({ ethPrice: 2000, wbtcPrice: 40000 });
+    const [usdxCol, setUsdxCol] = useState(0);
 
     // Filters
     const [typeFilter, setTypeFilter] = useState('all');
@@ -30,14 +31,16 @@ export default function Portfolio() {
         setLoading(true);
         try {
             const provider = getReadProvider();
-            const [txs, pos, oraclePrices] = await Promise.all([
+            const [txs, pos, oraclePrices, usdxCollateral] = await Promise.all([
                 getTransactionHistory(address, provider),
                 getUserPosition(address, provider),
                 getOraclePrices(provider),
+                getUserUSDXCollateral(address, provider).catch(() => '0'),
             ]);
             setTransactions(txs);
             setPosition(pos);
             setPrices(oraclePrices);
+            setUsdxCol(parseFloat(usdxCollateral));
         } catch (error) {
             console.error('Failed to fetch data:', error);
         } finally {
@@ -129,7 +132,7 @@ export default function Portfolio() {
     const ethDeposited = position ? parseFloat(ethers.formatEther(position.ethCollateral || 0n)) : 0;
     const wbtcDeposited = position ? parseFloat(ethers.formatUnits(position.wbtcCollateral || 0n, 8)) : 0;
     const debt = position ? parseFloat(ethers.formatEther(position.debtAmount || 0n)) : 0;
-    const totalCollateralUSD = ethDeposited * prices.ethPrice + wbtcDeposited * prices.wbtcPrice;
+    const totalCollateralUSD = ethDeposited * prices.ethPrice + wbtcDeposited * prices.wbtcPrice + usdxCol;
     const tier = position?.creditTier || 1;
     const interestInfo = debt > 0 ? calculateAccruedInterest(address, debt, tier) : null;
     const yieldInfo = calculateEarnedYield(address, ethDeposited, wbtcDeposited, prices);

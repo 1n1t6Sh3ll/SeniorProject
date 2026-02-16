@@ -6,7 +6,7 @@ import Tooltip from '../components/Tooltip';
 import ConfirmationModal from '../components/ConfirmationModal';
 import { SkeletonCard } from '../components/Skeleton';
 import { useToast } from '../components/Toast';
-import { withdrawETH, withdrawWBTC, getUserPosition, getOraclePrices, getReadProvider } from '../utils/contracts';
+import { withdrawETH, withdrawWBTC, withdrawUSDX, getUserPosition, getOraclePrices, getUserUSDXCollateral, getReadProvider } from '../utils/contracts';
 import { calculateWithdrawalFee } from '../utils/fees';
 
 export default function Withdraw() {
@@ -19,6 +19,7 @@ export default function Withdraw() {
     const [loading, setLoading] = useState(false);
     const [position, setPosition] = useState(null);
     const [prices, setPrices] = useState({ ethPrice: 2000, wbtcPrice: 40000 });
+    const [usdxCollateral, setUsdxCollateral] = useState('0');
     const [showConfirm, setShowConfirm] = useState(false);
 
     useEffect(() => {
@@ -28,12 +29,14 @@ export default function Withdraw() {
     const fetchPosition = async () => {
         try {
             const provider = getReadProvider();
-            const [pos, oraclePrices] = await Promise.all([
+            const [pos, oraclePrices, usdxCol] = await Promise.all([
                 getUserPosition(address, provider),
                 getOraclePrices(provider),
+                getUserUSDXCollateral(address, provider).catch(() => '0'),
             ]);
             setPosition(pos);
             setPrices(oraclePrices);
+            setUsdxCollateral(usdxCol);
         } catch (err) {
             console.error('Error fetching position:', err);
         }
@@ -42,7 +45,8 @@ export default function Withdraw() {
     const getMaxWithdraw = () => {
         if (!position) return '0';
         if (asset === 'ETH') return ethers.formatEther(position.ethCollateral || 0n);
-        return ethers.formatUnits(position.wbtcCollateral || 0n, 8);
+        if (asset === 'WBTC') return ethers.formatUnits(position.wbtcCollateral || 0n, 8);
+        return usdxCollateral;
     };
 
     const getNewHealthFactor = () => {
@@ -51,10 +55,12 @@ export default function Withdraw() {
         if (debt === 0) return null;
         const ethAmt = parseFloat(ethers.formatEther(position.ethCollateral || 0n));
         const wbtcAmt = parseFloat(ethers.formatUnits(position.wbtcCollateral || 0n, 8));
+        const usdxAmt = parseFloat(usdxCollateral);
         const withdrawAmt = parseFloat(amount) || 0;
         const newEth = asset === 'ETH' ? Math.max(0, ethAmt - withdrawAmt) : ethAmt;
         const newWbtc = asset === 'WBTC' ? Math.max(0, wbtcAmt - withdrawAmt) : wbtcAmt;
-        const newCollateral = newEth * prices.ethPrice + newWbtc * prices.wbtcPrice;
+        const newUsdx = asset === 'USDX' ? Math.max(0, usdxAmt - withdrawAmt) : usdxAmt;
+        const newCollateral = newEth * prices.ethPrice + newWbtc * prices.wbtcPrice + newUsdx;
         return (newCollateral * 0.75) / debt;
     };
 
@@ -63,7 +69,7 @@ export default function Withdraw() {
         if (!amount || parseFloat(amount) <= 0) { toast.warning('Invalid Amount', 'Please enter a valid amount'); return; }
         if (!isConnected) { toast.error('Wallet Error', 'Please connect your wallet'); return; }
         const maxW = parseFloat(getMaxWithdraw()) || 0;
-        if (parseFloat(amount) > maxW) { toast.error('Insufficient Collateral', `You only have ${maxW.toFixed(asset === 'ETH' ? 6 : 8)} ${asset} deposited`); return; }
+        if (parseFloat(amount) > maxW) { toast.error('Insufficient Collateral', `You only have ${maxW.toFixed(asset === 'WBTC' ? 8 : asset === 'ETH' ? 6 : 2)} ${asset} deposited`); return; }
         const newHF = getNewHealthFactor();
         if (newHF !== null && newHF < 1.0) { toast.error('Liquidation Risk', 'This withdrawal would drop your health factor below 1.0 and risk liquidation'); return; }
         setShowConfirm(true);
@@ -77,8 +83,10 @@ export default function Withdraw() {
             let tx;
             if (asset === 'ETH') {
                 tx = await withdrawETH(amount, signer);
-            } else {
+            } else if (asset === 'WBTC') {
                 tx = await withdrawWBTC(amount, signer);
+            } else {
+                tx = await withdrawUSDX(amount, signer);
             }
             const txHash = tx?.hash || tx?.transactionHash || '';
             toast.tx('Withdrawal Successful', `Withdrew ${amount} ${asset} from your collateral`, txHash);
@@ -127,8 +135,8 @@ export default function Withdraw() {
             <main className="page-section">
                 <div className="page-container">
                     <div className="page-header">
-                        <h1 className="page-title">Withdraw Collateral</h1>
-                        <p className="page-subtitle">Withdraw your deposited ETH or WBTC collateral</p>
+                        <h1 className="page-title">Withdraw</h1>
+                        <p className="page-subtitle">Withdraw your deposited ETH, WBTC, or USDX collateral</p>
                     </div>
 
                     <div className="dashboard-grid">
@@ -137,9 +145,10 @@ export default function Withdraw() {
                             <form onSubmit={handleWithdrawClick} className="flex flex-col gap-lg">
                                 <div className="form-group">
                                     <label className="form-label">Select Asset</label>
-                                    <select className="form-input" value={asset} onChange={(e) => setAsset(e.target.value)} disabled={loading}>
+                                    <select className="form-input" value={asset} onChange={(e) => { setAsset(e.target.value); setAmount(''); }} disabled={loading}>
                                         <option value="ETH">ETH - Ethereum</option>
                                         <option value="WBTC">WBTC - Wrapped Bitcoin</option>
+                                        <option value="USDX">USDX - Stablecoin</option>
                                     </select>
                                 </div>
 
@@ -150,7 +159,7 @@ export default function Withdraw() {
                                         <span className="input-addon">{asset}</span>
                                     </div>
                                     <div className="flex justify-between mt-sm text-sm text-muted">
-                                        <span>Deposited: <strong style={{ color: 'var(--text-primary)' }}>{parseFloat(maxWithdraw).toFixed(6)} {asset}</strong></span>
+                                        <span>Deposited: <strong style={{ color: 'var(--text-primary)' }}>{parseFloat(maxWithdraw).toFixed(asset === 'WBTC' ? 6 : asset === 'ETH' ? 6 : 2)} {asset}</strong></span>
                                         <button type="button" onClick={() => setAmount(maxWithdraw)} disabled={loading}
                                             style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', fontWeight: 700, fontSize: '0.85rem' }}>
                                             MAX
@@ -183,6 +192,15 @@ export default function Withdraw() {
                                     </div>
                                     <div className="text-xs text-muted">
                                         ${(parseFloat(ethers.formatUnits(position.wbtcCollateral || 0n, 8)) * prices.wbtcPrice).toFixed(2)}
+                                    </div>
+                                </div>
+                                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 'var(--spacing-lg)' }}>
+                                    <div className="text-sm text-muted mb-sm">USDX Deposited</div>
+                                    <div className="mono font-bold" style={{ fontSize: '1.5rem' }}>
+                                        {parseFloat(usdxCollateral).toFixed(2)} USDX
+                                    </div>
+                                    <div className="text-xs text-muted">
+                                        ${parseFloat(usdxCollateral).toFixed(2)}
                                     </div>
                                 </div>
                                 {newHF !== null && (

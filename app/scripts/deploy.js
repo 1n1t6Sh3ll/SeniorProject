@@ -32,11 +32,14 @@ async function main() {
     const oracleAddress = await oracle.getAddress();
     console.log("Price Oracle deployed to:", oracleAddress, "\n");
 
-    // Set WBTC price in oracle
-    console.log("Setting WBTC price in oracle...");
+    // Set prices in oracle
+    console.log("Setting asset prices in oracle...");
     const wbtcPrice = 40000 * 10 ** 8; // $40,000 with 8 decimals
     await oracle.updatePrice(wbtcAddress, wbtcPrice);
-    console.log("WBTC price set to $40,000\n");
+    console.log("  WBTC price set to $40,000");
+    const usdxPrice = 1 * 10 ** 8; // $1 with 8 decimals
+    await oracle.updatePrice(usdxAddress, usdxPrice);
+    console.log("  USDX price set to $1\n");
 
     // Deploy Credit Protocol
     console.log("Deploying Credit Protocol...");
@@ -54,7 +57,7 @@ async function main() {
     // Deploy SimpleSwap
     console.log("Deploying SimpleSwap...");
     const SimpleSwap = await hre.ethers.getContractFactory("SimpleSwap");
-    const swap = await SimpleSwap.deploy(oracleAddress, wbtcAddress);
+    const swap = await SimpleSwap.deploy(oracleAddress, wbtcAddress, usdxAddress);
     await swap.waitForDeployment();
     const swapAddress = await swap.getAddress();
     console.log("SimpleSwap deployed to:", swapAddress, "\n");
@@ -75,7 +78,19 @@ async function main() {
     await approveTx.wait();
     const addWbtcTx = await swap.addWBTCLiquidity(wbtcSeedAmount);
     await addWbtcTx.wait();
-    console.log("  Sent 10 WBTC to SimpleSwap pool\n");
+    console.log("  Sent 10 WBTC to SimpleSwap pool");
+
+    // Mint USDX for swap pool: temporarily set deployer as creditProtocol, mint, then restore
+    console.log("  Seeding USDX liquidity...");
+    await usdx.setCreditProtocol(deployer.address);
+    const usdxSeedAmount = hre.ethers.parseEther("500000"); // 500,000 USDX
+    await usdx.mint(deployer.address, usdxSeedAmount);
+    const approveUsdxTx = await usdx.approve(swapAddress, usdxSeedAmount);
+    await approveUsdxTx.wait();
+    const addUsdxTx = await swap.addUSDXLiquidity(usdxSeedAmount);
+    await addUsdxTx.wait();
+    await usdx.setCreditProtocol(protocolAddress); // Restore to real protocol
+    console.log("  Sent 500,000 USDX to SimpleSwap pool\n");
 
     // Print deployment summary
     console.log("=".repeat(60));

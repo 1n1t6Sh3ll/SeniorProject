@@ -161,6 +161,32 @@ export async function depositWBTC(amount, signer) {
     }
 }
 
+export async function depositUSDX(amount, signer) {
+    try {
+        const usdx = getContract('USDX', signer);
+        const creditProtocol = getContract('CreditProtocol', signer);
+        const creditProtocolAddress = getContractAddress(31337, 'CreditProtocol');
+
+        const amountWei = ethers.parseEther(amount.toString());
+
+        // Check and set allowance
+        const signerAddr = await signer.getAddress();
+        const allowance = await usdx.allowance(signerAddr, creditProtocolAddress);
+        if (allowance < amountWei) {
+            const approveTx = await usdx.approve(creditProtocolAddress, ethers.MaxUint256);
+            await approveTx.wait();
+        }
+
+        const tx = await creditProtocol.depositUSDX(amountWei);
+        await tx.wait();
+        return tx;
+    } catch (error) {
+        throw new Error(parseError(error));
+    }
+}
+
+// ── BORROW ──────────────────────────────────────────────────
+
 export async function borrowUSDX(amount, signer) {
     try {
         const creditProtocol = getContract('CreditProtocol', signer);
@@ -171,6 +197,30 @@ export async function borrowUSDX(amount, signer) {
         throw new Error(parseError(error));
     }
 }
+
+export async function borrowETH(amount, signer) {
+    try {
+        const creditProtocol = getContract('CreditProtocol', signer);
+        const tx = await creditProtocol.borrowETH(ethers.parseEther(amount.toString()));
+        await tx.wait();
+        return tx;
+    } catch (error) {
+        throw new Error(parseError(error));
+    }
+}
+
+export async function borrowWBTC(amount, signer) {
+    try {
+        const creditProtocol = getContract('CreditProtocol', signer);
+        const tx = await creditProtocol.borrowWBTC(ethers.parseUnits(amount.toString(), 8));
+        await tx.wait();
+        return tx;
+    } catch (error) {
+        throw new Error(parseError(error));
+    }
+}
+
+// ── REPAY ───────────────────────────────────────────────────
 
 export async function repayUSDX(amount, signer) {
     try {
@@ -196,6 +246,42 @@ export async function repayUSDX(amount, signer) {
     }
 }
 
+export async function repayETH(amount, signer) {
+    try {
+        const creditProtocol = getContract('CreditProtocol', signer);
+        const tx = await creditProtocol.repayETH({ value: ethers.parseEther(amount.toString()) });
+        await tx.wait();
+        return tx;
+    } catch (error) {
+        throw new Error(parseError(error));
+    }
+}
+
+export async function repayWBTC(amount, signer) {
+    try {
+        const wbtc = getContract('WBTC', signer);
+        const creditProtocol = getContract('CreditProtocol', signer);
+        const creditProtocolAddress = getContractAddress(31337, 'CreditProtocol');
+
+        const amountWei = ethers.parseUnits(amount.toString(), 8);
+
+        const signerAddr = await signer.getAddress();
+        const allowance = await wbtc.allowance(signerAddr, creditProtocolAddress);
+        if (allowance < amountWei) {
+            const approveTx = await wbtc.approve(creditProtocolAddress, ethers.MaxUint256);
+            await approveTx.wait();
+        }
+
+        const tx = await creditProtocol.repayWBTC(amountWei);
+        await tx.wait();
+        return tx;
+    } catch (error) {
+        throw new Error(parseError(error));
+    }
+}
+
+// ── POSITION QUERIES ────────────────────────────────────────
+
 export async function getUserPosition(address, providerOrNull) {
     try {
         const provider = providerOrNull || getReadProvider();
@@ -214,6 +300,34 @@ export async function getUserPosition(address, providerOrNull) {
     } catch (error) {
         console.error('Error fetching position:', error);
         return null;
+    }
+}
+
+export async function getUserDebts(address, providerOrNull) {
+    try {
+        const provider = providerOrNull || getReadProvider();
+        const creditProtocol = getContract('CreditProtocol', provider);
+        const debts = await creditProtocol.getUserDebts(address);
+        return {
+            usdxDebt: debts[0],
+            ethDebt: debts[1],
+            wbtcDebt: debts[2]
+        };
+    } catch (error) {
+        console.error('Error fetching debts:', error);
+        return { usdxDebt: 0n, ethDebt: 0n, wbtcDebt: 0n };
+    }
+}
+
+export async function getProtocolReserves(providerOrNull) {
+    try {
+        const provider = providerOrNull || getReadProvider();
+        const creditProtocol = getContract('CreditProtocol', provider);
+        const reserves = await creditProtocol.getReserves();
+        return { ethReserve: reserves[0], wbtcReserve: reserves[1] };
+    } catch (error) {
+        console.error('Error fetching reserves:', error);
+        return { ethReserve: 0n, wbtcReserve: 0n };
     }
 }
 
@@ -237,6 +351,29 @@ export async function withdrawWBTC(amount, signer) {
         return tx;
     } catch (error) {
         throw new Error(parseError(error));
+    }
+}
+
+export async function withdrawUSDX(amount, signer) {
+    try {
+        const creditProtocol = getContract('CreditProtocol', signer);
+        const tx = await creditProtocol.withdrawUSDX(ethers.parseEther(amount.toString()));
+        await tx.wait();
+        return tx;
+    } catch (error) {
+        throw new Error(parseError(error));
+    }
+}
+
+export async function getUserUSDXCollateral(address, providerOrNull) {
+    try {
+        const provider = providerOrNull || getReadProvider();
+        const creditProtocol = getContract('CreditProtocol', provider);
+        const usdxCollateral = await creditProtocol.getUserUSDXCollateral(address);
+        return ethers.formatEther(usdxCollateral);
+    } catch (error) {
+        console.error('Error fetching USDX collateral:', error);
+        return '0';
     }
 }
 
@@ -330,10 +467,55 @@ export async function discoverAllUsers(providerOrNull) {
 
 // ===== SimpleSwap Functions =====
 
-export async function swapETHForWBTC(ethAmount, signer) {
+function _getTokenAddress(asset) {
+    if (asset === 'ETH') return ethers.ZeroAddress;
+    if (asset === 'WBTC') return getContractAddress(31337, 'WBTC');
+    if (asset === 'USDX') return getContractAddress(31337, 'USDX');
+    return ethers.ZeroAddress;
+}
+
+function _getDecimals(asset) {
+    if (asset === 'WBTC') return 8;
+    return 18; // ETH and USDX both use 18
+}
+
+async function _approveIfNeeded(tokenName, signer, spender, amount) {
+    const token = getContract(tokenName, signer);
+    const signerAddr = await signer.getAddress();
+    const allowance = await token.allowance(signerAddr, spender);
+    if (allowance < amount) {
+        const approveTx = await token.approve(spender, ethers.MaxUint256);
+        await approveTx.wait();
+    }
+}
+
+export async function swapAssets(fromAsset, toAsset, amount, signer) {
     try {
         const swap = getContract('SimpleSwap', signer);
-        const tx = await swap.swapETHForWBTC({ value: ethers.parseEther(ethAmount.toString()) });
+        const swapAddress = getContractAddress(31337, 'SimpleSwap');
+        const decimals = _getDecimals(fromAsset);
+        const amountWei = ethers.parseUnits(amount.toString(), decimals);
+
+        // Approve ERC20 tokens if needed
+        if (fromAsset === 'WBTC') await _approveIfNeeded('WBTC', signer, swapAddress, amountWei);
+        if (fromAsset === 'USDX') await _approveIfNeeded('USDX', signer, swapAddress, amountWei);
+
+        let tx;
+        if (fromAsset === 'ETH' && toAsset === 'WBTC') {
+            tx = await swap.swapETHForWBTC({ value: amountWei });
+        } else if (fromAsset === 'ETH' && toAsset === 'USDX') {
+            tx = await swap.swapETHForUSDX({ value: amountWei });
+        } else if (fromAsset === 'WBTC' && toAsset === 'ETH') {
+            tx = await swap.swapWBTCForETH(amountWei);
+        } else if (fromAsset === 'WBTC' && toAsset === 'USDX') {
+            tx = await swap.swapWBTCForUSDX(amountWei);
+        } else if (fromAsset === 'USDX' && toAsset === 'ETH') {
+            tx = await swap.swapUSDXForETH(amountWei);
+        } else if (fromAsset === 'USDX' && toAsset === 'WBTC') {
+            tx = await swap.swapUSDXForWBTC(amountWei);
+        } else {
+            throw new Error(`Unsupported swap pair: ${fromAsset} -> ${toAsset}`);
+        }
         await tx.wait();
         return tx;
     } catch (error) {
@@ -341,49 +523,29 @@ export async function swapETHForWBTC(ethAmount, signer) {
     }
 }
 
+// Keep old functions for backward compatibility
+export async function swapETHForWBTC(ethAmount, signer) {
+    return swapAssets('ETH', 'WBTC', ethAmount, signer);
+}
+
 export async function swapWBTCForETH(wbtcAmount, signer) {
-    try {
-        const wbtc = getContract('WBTC', signer);
-        const swap = getContract('SimpleSwap', signer);
-        const swapAddress = getContractAddress(31337, 'SimpleSwap');
-
-        const amountWei = ethers.parseUnits(wbtcAmount.toString(), 8);
-
-        // Check and set allowance
-        const signerAddr = await signer.getAddress();
-        const allowance = await wbtc.allowance(signerAddr, swapAddress);
-        if (allowance < amountWei) {
-            const approveTx = await wbtc.approve(swapAddress, ethers.MaxUint256);
-            await approveTx.wait();
-        }
-
-        const tx = await swap.swapWBTCForETH(amountWei);
-        await tx.wait();
-        return tx;
-    } catch (error) {
-        throw new Error(parseError(error));
-    }
+    return swapAssets('WBTC', 'ETH', wbtcAmount, signer);
 }
 
 export async function getSwapQuote(fromAsset, toAsset, amount, providerOrNull) {
     try {
         const provider = providerOrNull || getReadProvider();
         const swap = getContract('SimpleSwap', provider);
-        const wbtcAddress = getContractAddress(31337, 'WBTC');
 
-        const fromToken = fromAsset === 'ETH' ? ethers.ZeroAddress : wbtcAddress;
-        const toToken = toAsset === 'ETH' ? ethers.ZeroAddress : wbtcAddress;
-
-        const amountIn = fromAsset === 'ETH'
-            ? ethers.parseEther(amount.toString())
-            : ethers.parseUnits(amount.toString(), 8);
+        const fromToken = _getTokenAddress(fromAsset);
+        const toToken = _getTokenAddress(toAsset);
+        const decimals = _getDecimals(fromAsset);
+        const amountIn = ethers.parseUnits(amount.toString(), decimals);
 
         const amountOut = await swap.getQuote(fromToken, toToken, amountIn);
 
-        // Format output based on toAsset
-        return toAsset === 'ETH'
-            ? ethers.formatEther(amountOut)
-            : ethers.formatUnits(amountOut, 8);
+        const outDecimals = _getDecimals(toAsset);
+        return ethers.formatUnits(amountOut, outDecimals);
     } catch (error) {
         console.error('Error getting swap quote:', error);
         return '0';
@@ -394,14 +556,15 @@ export async function getSwapPoolReserves(providerOrNull) {
     try {
         const provider = providerOrNull || getReadProvider();
         const swap = getContract('SimpleSwap', provider);
-        const [ethReserve, wbtcReserve] = await swap.getReserves();
+        const [ethReserve, wbtcReserve, usdxReserve] = await swap.getReserves();
         return {
             ethReserve: ethers.formatEther(ethReserve),
             wbtcReserve: ethers.formatUnits(wbtcReserve, 8),
+            usdxReserve: ethers.formatEther(usdxReserve),
         };
     } catch (error) {
         console.error('Error fetching pool reserves:', error);
-        return { ethReserve: '0', wbtcReserve: '0' };
+        return { ethReserve: '0', wbtcReserve: '0', usdxReserve: '0' };
     }
 }
 

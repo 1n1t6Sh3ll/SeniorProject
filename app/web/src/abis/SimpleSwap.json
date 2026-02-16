@@ -11,6 +11,11 @@
           "internalType": "address",
           "name": "_wbtc",
           "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_usdx",
+          "type": "address"
         }
       ],
       "stateMutability": "nonpayable",
@@ -185,6 +190,19 @@
           "type": "uint256"
         }
       ],
+      "name": "addUSDXLiquidity",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "amount",
+          "type": "uint256"
+        }
+      ],
       "name": "addWBTCLiquidity",
       "outputs": [],
       "stateMutability": "nonpayable",
@@ -232,6 +250,11 @@
           "internalType": "uint256",
           "name": "wbtcReserve",
           "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "usdxReserve",
+          "type": "uint256"
         }
       ],
       "stateMutability": "view",
@@ -272,9 +295,42 @@
     },
     {
       "inputs": [],
+      "name": "swapETHForUSDX",
+      "outputs": [],
+      "stateMutability": "payable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
       "name": "swapETHForWBTC",
       "outputs": [],
       "stateMutability": "payable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "usdxAmount",
+          "type": "uint256"
+        }
+      ],
+      "name": "swapUSDXForETH",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "usdxAmount",
+          "type": "uint256"
+        }
+      ],
+      "name": "swapUSDXForWBTC",
+      "outputs": [],
+      "stateMutability": "nonpayable",
       "type": "function"
     },
     {
@@ -293,6 +349,19 @@
     {
       "inputs": [
         {
+          "internalType": "uint256",
+          "name": "wbtcAmount",
+          "type": "uint256"
+        }
+      ],
+      "name": "swapWBTCForUSDX",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
           "internalType": "address",
           "name": "newOwner",
           "type": "address"
@@ -301,6 +370,19 @@
       "name": "transferOwnership",
       "outputs": [],
       "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "usdx",
+      "outputs": [
+        {
+          "internalType": "contract IERC20",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
       "type": "function"
     },
     {

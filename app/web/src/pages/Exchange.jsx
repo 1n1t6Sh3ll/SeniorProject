@@ -5,21 +5,23 @@ import { ethers } from 'ethers';
 import Icon from '../components/Icon';
 import {
     getOraclePrices, getReadProvider,
-    getWBTCBalance, swapETHForWBTC, swapWBTCForETH,
+    getWBTCBalance, getUSDXBalance, swapAssets,
     getSwapQuote, getSwapPoolReserves
 } from '../utils/contracts';
+
+const ASSETS = ['ETH', 'WBTC', 'USDX'];
 
 export default function Exchange() {
     const { address, isConnected } = useWallet();
     const { getSigner: getSignerFn } = useWalletSigner();
 
     const [fromAsset, setFromAsset] = useState('ETH');
-    const [toAsset, setToAsset] = useState('WBTC');
+    const [toAsset, setToAsset] = useState('USDX');
     const [fromAmount, setFromAmount] = useState('');
     const [quoteAmount, setQuoteAmount] = useState('');
     const [prices, setPrices] = useState({ ethPrice: 2000, wbtcPrice: 40000 });
-    const [balances, setBalances] = useState({ eth: '0', wbtc: '0' });
-    const [reserves, setReserves] = useState({ ethReserve: '0', wbtcReserve: '0' });
+    const [balances, setBalances] = useState({ eth: '0', wbtc: '0', usdx: '0' });
+    const [reserves, setReserves] = useState({ ethReserve: '0', wbtcReserve: '0', usdxReserve: '0' });
     const [refreshTimer, setRefreshTimer] = useState(15);
     const [swapping, setSwapping] = useState(false);
     const [txHash, setTxHash] = useState(null);
@@ -29,17 +31,19 @@ export default function Exchange() {
     const fetchData = useCallback(async () => {
         try {
             const provider = getReadProvider();
-            const [p, res, ethBal, wbtcBal] = await Promise.all([
+            const [p, res, ethBal, wbtcBal, usdxBal] = await Promise.all([
                 getOraclePrices(provider),
                 getSwapPoolReserves(provider),
                 address ? provider.getBalance(address) : Promise.resolve(0n),
-                address ? getWBTCBalance(address, provider) : Promise.resolve('0'),
+                address ? getWBTCBalance(address, provider).catch(() => '0') : Promise.resolve('0'),
+                address ? getUSDXBalance(address, provider).catch(() => '0') : Promise.resolve('0'),
             ]);
             setPrices(p);
             setReserves(res);
             setBalances({
                 eth: ethBal ? ethers.formatEther(ethBal) : '0',
                 wbtc: wbtcBal,
+                usdx: usdxBal,
             });
             setRefreshTimer(15);
         } catch {}
@@ -57,7 +61,7 @@ export default function Exchange() {
     // Live quote as user types
     useEffect(() => {
         const amt = parseFloat(fromAmount);
-        if (!amt || amt <= 0) { setQuoteAmount(''); return; }
+        if (!amt || amt <= 0 || fromAsset === toAsset) { setQuoteAmount(''); return; }
 
         const timeout = setTimeout(async () => {
             try {
@@ -79,12 +83,21 @@ export default function Exchange() {
         setError(null);
     };
 
+    const getBalance = (asset) => {
+        if (asset === 'ETH') return balances.eth;
+        if (asset === 'WBTC') return balances.wbtc;
+        return balances.usdx;
+    };
+
+    const getDecimals = (asset) => asset === 'WBTC' ? 6 : asset === 'ETH' ? 4 : 2;
+
     const handleMax = () => {
+        const bal = parseFloat(getBalance(fromAsset)) || 0;
         if (fromAsset === 'ETH') {
-            const max = Math.max(0, parseFloat(balances.eth) - 0.01); // Keep some for gas
+            const max = Math.max(0, bal - 0.01); // Keep some for gas
             setFromAmount(max > 0 ? max.toFixed(6) : '');
         } else {
-            setFromAmount(balances.wbtc);
+            setFromAmount(bal > 0 ? bal.toString() : '');
         }
     };
 
@@ -92,8 +105,9 @@ export default function Exchange() {
         const amt = parseFloat(fromAmount);
         if (!amt || amt <= 0) { setError('Please enter a valid amount'); return; }
         if (!isConnected) { setError('Please connect your wallet'); return; }
-        const bal = parseFloat(fromAsset === 'ETH' ? balances.eth : balances.wbtc) || 0;
-        if (amt > bal) { setError(`Insufficient ${fromAsset} balance. You have ${bal.toFixed(fromAsset === 'ETH' ? 6 : 8)} ${fromAsset}`); return; }
+        if (fromAsset === toAsset) { setError('Cannot swap same asset'); return; }
+        const bal = parseFloat(getBalance(fromAsset)) || 0;
+        if (amt > bal) { setError(`Insufficient ${fromAsset} balance. You have ${bal.toFixed(getDecimals(fromAsset))} ${fromAsset}`); return; }
 
         setSwapping(true);
         setError(null);
@@ -101,13 +115,7 @@ export default function Exchange() {
 
         try {
             const signer = await getSignerFn();
-            let tx;
-
-            if (fromAsset === 'ETH') {
-                tx = await swapETHForWBTC(fromAmount, signer);
-            } else {
-                tx = await swapWBTCForETH(fromAmount, signer);
-            }
+            const tx = await swapAssets(fromAsset, toAsset, fromAmount, signer);
 
             setTxHash(tx.hash);
 
@@ -131,20 +139,28 @@ export default function Exchange() {
         }
     };
 
-    const getPrice = (asset) => asset === 'ETH' ? prices.ethPrice : prices.wbtcPrice;
+    const getPrice = (asset) => {
+        if (asset === 'ETH') return prices.ethPrice;
+        if (asset === 'WBTC') return prices.wbtcPrice;
+        return 1; // USDX = $1
+    };
+
     const inputAmt = parseFloat(fromAmount) || 0;
     const outputAmt = parseFloat(quoteAmount) || 0;
-    const rate = prices.wbtcPrice > 0 && prices.ethPrice > 0
-        ? (fromAsset === 'ETH' ? prices.ethPrice / prices.wbtcPrice : prices.wbtcPrice / prices.ethPrice)
-        : 0;
-    const currentBalance = fromAsset === 'ETH' ? balances.eth : balances.wbtc;
+    const fromPrice = getPrice(fromAsset);
+    const toPrice = getPrice(toAsset);
+    const rate = toPrice > 0 && fromPrice > 0 ? fromPrice / toPrice : 0;
+    const currentBalance = getBalance(fromAsset);
+
+    // Available "to" assets (exclude from)
+    const toOptions = ASSETS.filter(a => a !== fromAsset);
 
     return (
         <main className="page-section">
             <div className="page-container">
                 <div className="page-header">
                     <h1 className="page-title">Exchange</h1>
-                    <p className="page-subtitle">Swap between ETH and WBTC on-chain using oracle prices</p>
+                    <p className="page-subtitle">Swap between ETH, WBTC, and USDX on-chain using oracle prices</p>
                 </div>
 
                 <div className="dashboard-grid">
@@ -158,17 +174,20 @@ export default function Exchange() {
                                 <div className="flex justify-between text-sm mb-sm">
                                     <span className="text-muted">From</span>
                                     <span className="text-muted">
-                                        Balance: {parseFloat(currentBalance).toFixed(fromAsset === 'ETH' ? 4 : 6)} {fromAsset}
+                                        Balance: {parseFloat(currentBalance).toFixed(getDecimals(fromAsset))} {fromAsset}
                                     </span>
                                 </div>
                                 <div className="flex gap-md items-center">
                                     <select className="form-input" value={fromAsset} onChange={e => {
-                                        setFromAsset(e.target.value);
-                                        if (e.target.value === toAsset) setToAsset(fromAsset);
+                                        const newFrom = e.target.value;
+                                        setFromAsset(newFrom);
+                                        if (newFrom === toAsset) {
+                                            // Pick the first available "to" that isn't the new "from"
+                                            setToAsset(ASSETS.find(a => a !== newFrom));
+                                        }
                                         setFromAmount(''); setQuoteAmount('');
                                     }} style={{ width: '120px', flexShrink: 0 }}>
-                                        <option value="ETH">ETH</option>
-                                        <option value="WBTC">WBTC</option>
+                                        {ASSETS.map(a => <option key={a} value={a}>{a}</option>)}
                                     </select>
                                     <input type="number" className="form-input mono" placeholder="0.0" step="0.000001"
                                         value={fromAmount} onChange={e => setFromAmount(e.target.value)} style={{ textAlign: 'right' }} />
@@ -176,7 +195,7 @@ export default function Exchange() {
                                 </div>
                                 {inputAmt > 0 && (
                                     <div className="text-xs mt-sm" style={{ color: 'var(--accent)', textAlign: 'right' }}>
-                                        ≈ ${(inputAmt * getPrice(fromAsset)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                                        ≈ ${(inputAmt * fromPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
                                     </div>
                                 )}
                             </div>
@@ -193,24 +212,26 @@ export default function Exchange() {
                             <div className="exchange-box">
                                 <div className="flex justify-between text-sm mb-sm">
                                     <span className="text-muted">To (estimated)</span>
-                                    <span className="text-muted">Price: ${getPrice(toAsset).toLocaleString()}</span>
+                                    <span className="text-muted">Price: ${toPrice.toLocaleString()}</span>
                                 </div>
                                 <div className="flex gap-md items-center">
                                     <select className="form-input" value={toAsset} onChange={e => {
-                                        setToAsset(e.target.value);
-                                        if (e.target.value === fromAsset) setFromAsset(toAsset);
+                                        const newTo = e.target.value;
+                                        setToAsset(newTo);
+                                        if (newTo === fromAsset) {
+                                            setFromAsset(ASSETS.find(a => a !== newTo));
+                                        }
                                         setQuoteAmount('');
                                     }} style={{ width: '120px', flexShrink: 0 }}>
-                                        <option value="ETH">ETH</option>
-                                        <option value="WBTC">WBTC</option>
+                                        {ASSETS.filter(a => a !== fromAsset).map(a => <option key={a} value={a}>{a}</option>)}
                                     </select>
                                     <div className="form-input mono" style={{ textAlign: 'right', background: 'var(--bg-tertiary)', cursor: 'default' }}>
-                                        {outputAmt > 0 ? outputAmt.toFixed(toAsset === 'ETH' ? 6 : 8) : '0.0'}
+                                        {outputAmt > 0 ? outputAmt.toFixed(getDecimals(toAsset)) : '0.0'}
                                     </div>
                                 </div>
                                 {outputAmt > 0 && (
                                     <div className="text-xs mt-sm" style={{ color: 'var(--success)', textAlign: 'right' }}>
-                                        ≈ ${(outputAmt * getPrice(toAsset)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                                        ≈ ${(outputAmt * toPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
                                     </div>
                                 )}
                             </div>
@@ -225,7 +246,7 @@ export default function Exchange() {
                                 }}>
                                     <div className="flex justify-between text-sm mb-sm">
                                         <span className="text-muted">Exchange Rate</span>
-                                        <span className="mono">1 {fromAsset} = {rate.toFixed(8)} {toAsset}</span>
+                                        <span className="mono">1 {fromAsset} = {rate.toFixed(toAsset === 'WBTC' ? 8 : toAsset === 'USDX' ? 2 : 6)} {toAsset}</span>
                                     </div>
                                     <div className="flex justify-between text-sm">
                                         <span className="text-muted">Swap Fee</span>
@@ -251,7 +272,7 @@ export default function Exchange() {
                             <button
                                 className="btn btn-primary w-full"
                                 onClick={handleSwap}
-                                disabled={inputAmt <= 0 || swapping}
+                                disabled={inputAmt <= 0 || swapping || fromAsset === toAsset}
                             >
                                 {swapping ? 'Swapping...' : inputAmt <= 0 ? 'Enter Amount' : `Swap ${fromAsset} for ${toAsset}`}
                             </button>
@@ -287,6 +308,13 @@ export default function Exchange() {
                                 </div>
                             </div>
 
+                            <div style={{ borderTop: '1px solid var(--border)', paddingTop: 'var(--spacing-lg)' }}>
+                                <div className="text-sm text-muted mb-sm">USDX Price</div>
+                                <div className="mono font-bold" style={{ fontSize: '1.5rem' }}>
+                                    $1.00
+                                </div>
+                            </div>
+
                             {/* Pool Reserves */}
                             <div style={{ borderTop: '1px solid var(--border)', paddingTop: 'var(--spacing-lg)' }}>
                                 <div className="text-sm font-bold mb-md">Pool Liquidity</div>
@@ -294,9 +322,13 @@ export default function Exchange() {
                                     <span className="text-muted">ETH Reserve</span>
                                     <span className="mono">{parseFloat(reserves.ethReserve).toFixed(4)} ETH</span>
                                 </div>
-                                <div className="flex justify-between text-sm">
+                                <div className="flex justify-between text-sm mb-sm">
                                     <span className="text-muted">WBTC Reserve</span>
                                     <span className="mono">{parseFloat(reserves.wbtcReserve).toFixed(6)} WBTC</span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                    <span className="text-muted">USDX Reserve</span>
+                                    <span className="mono">{parseFloat(reserves.usdxReserve || '0').toLocaleString()} USDX</span>
                                 </div>
                             </div>
 
@@ -312,7 +344,7 @@ export default function Exchange() {
                                                 borderRadius: 'var(--radius-md)',
                                             }}>
                                                 <span className="mono">
-                                                    {swap.fromAmount.toFixed(4)} {swap.from} &rarr; {swap.toAmount.toFixed(6)} {swap.to}
+                                                    {swap.fromAmount.toFixed(4)} {swap.from} &rarr; {swap.toAmount.toFixed(swap.to === 'WBTC' ? 6 : 4)} {swap.to}
                                                 </span>
                                                 <span className="text-muted">
                                                     {new Date(swap.timestamp).toLocaleTimeString()}

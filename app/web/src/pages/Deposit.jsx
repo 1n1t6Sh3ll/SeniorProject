@@ -4,7 +4,7 @@ import { useToast } from '../components/Toast';
 import Tooltip from '../components/Tooltip';
 import { useWallet } from '../hooks/useWallet';
 import { useWalletSigner } from '../hooks/useWalletSigner';
-import { depositETH, depositWBTC, getWBTCBalance, getWBTCFromFaucet, getUserPosition, getOraclePrices, getReadProvider } from '../utils/contracts';
+import { depositETH, depositWBTC, depositUSDX, getWBTCBalance, getUSDXBalance, getWBTCFromFaucet, getUserPosition, getOraclePrices, getReadProvider } from '../utils/contracts';
 import { getSupplyAPY, getProjectedYield, recordDeposit } from '../utils/supplyYield';
 
 export default function Deposit() {
@@ -18,6 +18,7 @@ export default function Deposit() {
     const [faucetLoading, setFaucetLoading] = useState(false);
     const [wbtcBalance, setWBTCBalance] = useState('0');
     const [ethBalance, setETHBalance] = useState('0');
+    const [usdxBalance, setUSDXBalance] = useState('0');
     const [position, setPosition] = useState(null);
     const [oraclePrices, setOraclePrices] = useState(null);
 
@@ -33,10 +34,14 @@ export default function Deposit() {
     const fetchBalances = async () => {
         try {
             const provider = getReadProvider();
-            const ethBal = await provider.getBalance(address);
+            const [ethBal, wbtcBal, usdxBal] = await Promise.all([
+                provider.getBalance(address),
+                getWBTCBalance(address, provider),
+                getUSDXBalance(address, provider).catch(() => '0'),
+            ]);
             setETHBalance(ethers.formatEther(ethBal));
-            const wbtcBal = await getWBTCBalance(address, provider);
             setWBTCBalance(wbtcBal);
+            setUSDXBalance(usdxBal);
         } catch (error) {
             console.error('Error fetching balances:', error);
         }
@@ -73,7 +78,7 @@ export default function Deposit() {
         e.preventDefault();
         if (!amount || parseFloat(amount) <= 0) { toast.warning('Invalid Amount', 'Please enter a valid amount'); return; }
         if (!isConnected) { toast.error('Error', 'Please connect your wallet'); return; }
-        const bal = parseFloat(asset === 'ETH' ? ethBalance : wbtcBalance) || 0;
+        const bal = parseFloat(asset === 'ETH' ? ethBalance : asset === 'WBTC' ? wbtcBalance : usdxBalance) || 0;
         if (parseFloat(amount) > bal) { toast.error('Insufficient Balance', `You only have ${bal.toFixed(asset === 'ETH' ? 6 : 8)} ${asset}`); return; }
 
         setLoading(true);
@@ -83,11 +88,12 @@ export default function Deposit() {
             let tx;
             if (asset === 'ETH') {
                 tx = await depositETH(amount, signer);
-                toast.tx('Deposit Successful', `Deposited ${amount} ETH as collateral`, tx?.hash || '');
-            } else {
+            } else if (asset === 'WBTC') {
                 tx = await depositWBTC(amount, signer);
-                toast.tx('Deposit Successful', `Deposited ${amount} WBTC as collateral`, tx?.hash || '');
+            } else {
+                tx = await depositUSDX(amount, signer);
             }
+            toast.tx('Deposit Successful', `Deposited ${amount} ${asset} as collateral`, tx?.hash || '');
             recordDeposit(asset, amount, address);
             setAmount('');
             await fetchBalances();
@@ -98,7 +104,7 @@ export default function Deposit() {
         }
     };
 
-    const maxBalance = asset === 'ETH' ? ethBalance : wbtcBalance;
+    const maxBalance = asset === 'ETH' ? ethBalance : asset === 'WBTC' ? wbtcBalance : usdxBalance;
 
     return (
         <>
@@ -106,7 +112,7 @@ export default function Deposit() {
                 <div className="page-container">
                     <div className="page-header">
                         <h1 className="page-title">Deposit Collateral</h1>
-                        <p className="page-subtitle">Add ETH or WBTC as collateral to borrow USDX</p>
+                        <p className="page-subtitle">Add ETH, WBTC, or USDX as collateral to borrow against</p>
                     </div>
 
                     <div className="dashboard-grid">
@@ -118,6 +124,7 @@ export default function Deposit() {
                                     <select className="form-input" value={asset} onChange={(e) => setAsset(e.target.value)} disabled={loading}>
                                         <option value="ETH">ETH - Ethereum</option>
                                         <option value="WBTC">WBTC - Wrapped Bitcoin</option>
+                                        <option value="USDX">USDX - Stablecoin</option>
                                     </select>
                                 </div>
 
@@ -181,8 +188,9 @@ export default function Deposit() {
                             <h3 className="card-title">Collateral Details</h3>
                             <div className="flex flex-col gap-lg">
                                 {[
-                                    { symbol: 'ETH', name: 'Ethereum', type: 'Native asset', ltv: '60%', liq: '75%' },
-                                    { symbol: 'WBTC', name: 'Bitcoin', type: 'ERC-20 token', ltv: '65%', liq: '80%' },
+                                    { symbol: 'ETH', name: 'Ethereum', type: 'Native asset', ltv: '60%', liq: '75%', icon: '\u039E' },
+                                    { symbol: 'WBTC', name: 'Bitcoin', type: 'ERC-20 token', ltv: '65%', liq: '80%', icon: '\u20BF' },
+                                    { symbol: 'USDX', name: 'Stablecoin', type: 'ERC-20 token', ltv: '80%', liq: '90%', icon: '$' },
                                 ].map(item => (
                                     <div key={item.symbol} style={{
                                         padding: 'var(--spacing-lg)',
@@ -191,7 +199,7 @@ export default function Deposit() {
                                         border: '1px solid var(--border)'
                                     }}>
                                         <div className="flex items-center gap-md mb-md">
-                                            <div style={{ fontSize: '1.75rem', fontWeight: 800 }}>{item.symbol === 'ETH' ? '\u039E' : '\u20BF'}</div>
+                                            <div style={{ fontSize: '1.75rem', fontWeight: 800 }}>{item.icon}</div>
                                             <div>
                                                 <div className="font-bold">{item.name}</div>
                                                 <div className="text-xs text-muted">{item.type}</div>
@@ -211,7 +219,7 @@ export default function Deposit() {
                                 ))}
 
                                 <div className="info-box info">
-                                    <strong>Pro Tip:</strong> WBTC offers 5% higher LTV than ETH, allowing you to borrow more per unit of collateral.
+                                    <strong>Pro Tip:</strong> USDX has the highest LTV (80%) since it's a stablecoin. WBTC (65%) offers higher LTV than ETH (60%).
                                 </div>
                             </div>
                         </div>

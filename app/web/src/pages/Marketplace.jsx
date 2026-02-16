@@ -9,7 +9,7 @@ import { useToast } from '../components/Toast';
 import {
     getUSDXBalance, getWBTCBalance, getOraclePrices,
     getContract, getReadProvider, getUserPosition, borrowUSDX,
-    depositETH, depositWBTC, getWBTCFromFaucet
+    depositETH, depositWBTC, depositUSDX, getWBTCFromFaucet
 } from '../utils/contracts';
 import { getAPRForTier, formatAPR, generateRepaymentPlans, recordBorrow } from '../utils/interest';
 import {
@@ -135,6 +135,9 @@ export default function Marketplace() {
     const [loanProduct, setLoanProduct] = useState(null);
     const [selectedPlan, setSelectedPlan] = useState(1);
     const [loanProcessing, setLoanProcessing] = useState(false);
+    const [financeDepAsset, setFinanceDepAsset] = useState('ETH');
+    const [financeDepAmount, setFinanceDepAmount] = useState('');
+    const [financeDepLoading, setFinanceDepLoading] = useState(false);
 
     // General loan application state
     const [showLoanApp, setShowLoanApp] = useState(false);
@@ -228,8 +231,35 @@ export default function Marketplace() {
         const shortfall = Math.max(0, product.price - usdxBal);
         const borrowAmount = Math.ceil(shortfall * 100) / 100;
         const canBorrow = borrowAmount <= availableToBorrow;
-        const plans = generateRepaymentPlans(borrowAmount, apr);
+        // Generate plans based on actual borrow amount; if 0, use full price for display
+        const planBase = borrowAmount > 0 ? borrowAmount : product.price;
+        const plans = generateRepaymentPlans(planBase, apr);
         return { usdxBal, shortfall, borrowAmount, canBorrow, plans };
+    };
+
+    // Finance modal: inline deposit collateral
+    const handleFinanceDeposit = async () => {
+        const amt = parseFloat(financeDepAmount);
+        if (!amt || amt <= 0) { toast.warning('Invalid', 'Enter a deposit amount'); return; }
+        const bal = parseFloat(financeDepAsset === 'ETH' ? balances.eth : financeDepAsset === 'WBTC' ? balances.wbtc : balances.usdx) || 0;
+        if (amt > bal) { toast.error('Insufficient Balance', `You only have ${bal.toFixed(financeDepAsset === 'WBTC' ? 6 : financeDepAsset === 'ETH' ? 4 : 2)} ${financeDepAsset}`); return; }
+
+        setFinanceDepLoading(true);
+        try {
+            const signer = await getSignerFn();
+            if (financeDepAsset === 'ETH') {
+                await depositETH(financeDepAmount, signer);
+            } else if (financeDepAsset === 'WBTC') {
+                await depositWBTC(financeDepAmount, signer);
+            } else {
+                await depositUSDX(financeDepAmount, signer);
+            }
+            toast.success('Collateral Deposited', `Deposited ${financeDepAmount} ${financeDepAsset}`);
+            setFinanceDepAmount('');
+            await fetchData();
+        } catch (err) {
+            toast.error('Deposit Failed', err.reason || err.message || 'Failed');
+        } finally { setFinanceDepLoading(false); }
     };
 
     // ====== HANDLERS ======
@@ -293,13 +323,20 @@ export default function Marketplace() {
     const executeLoanPurchase = async () => {
         if (!loanProduct) return;
         const info = getLoanInfo(loanProduct);
-        if (!info || !info.canBorrow) return;
+        if (!info) return;
         setLoanProcessing(true);
         try {
             const signer = await getSignerFn();
-            toast.info('Step 1/2', `Borrowing ${info.borrowAmount.toFixed(2)} USDX...`);
-            await borrowUSDX(info.borrowAmount.toFixed(2), signer);
-            recordBorrow(address, info.borrowAmount, tier);
+
+            // Only borrow if there's actually a shortfall
+            if (info.borrowAmount > 0) {
+                if (!info.canBorrow) { toast.error('Cannot Borrow', 'Borrow amount exceeds your available limit'); setLoanProcessing(false); return; }
+                toast.info('Step 1/2', `Borrowing ${info.borrowAmount.toFixed(2)} USDX...`);
+                await borrowUSDX(info.borrowAmount.toFixed(2), signer);
+                recordBorrow(address, info.borrowAmount, tier);
+            } else {
+                toast.info('Step 1/2', 'You have enough USDX — no borrowing needed');
+            }
 
             toast.info('Step 2/2', `Purchasing ${loanProduct.name}...`);
             const usdx = getContract('USDX', signer);
@@ -329,16 +366,18 @@ export default function Marketplace() {
     const handleLoanDeposit = async () => {
         const amt = parseFloat(depositAmount);
         if (!amt || amt <= 0) { toast.warning('Invalid', 'Enter a deposit amount'); return; }
-        const bal = parseFloat(depositAsset === 'ETH' ? balances.eth : balances.wbtc) || 0;
-        if (amt > bal) { toast.error('Insufficient Balance', `You only have ${bal.toFixed(6)} ${depositAsset}`); return; }
+        const bal = parseFloat(depositAsset === 'ETH' ? balances.eth : depositAsset === 'WBTC' ? balances.wbtc : balances.usdx) || 0;
+        if (amt > bal) { toast.error('Insufficient Balance', `You only have ${bal.toFixed(depositAsset === 'WBTC' ? 6 : depositAsset === 'ETH' ? 4 : 2)} ${depositAsset}`); return; }
 
         setLoanAppProcessing(true);
         try {
             const signer = await getSignerFn();
             if (depositAsset === 'ETH') {
                 await depositETH(depositAmount, signer);
-            } else {
+            } else if (depositAsset === 'WBTC') {
                 await depositWBTC(depositAmount, signer);
+            } else {
+                await depositUSDX(depositAmount, signer);
             }
             toast.success('Collateral Deposited', `Deposited ${depositAmount} ${depositAsset}`);
             setDepositAmount('');
@@ -1148,42 +1187,126 @@ export default function Marketplace() {
                                     <span className="mono" style={{ color: loanInfo.canBorrow ? 'var(--success)' : 'var(--danger)' }}>${availableToBorrow.toFixed(2)}</span>
                                 </div>
                             </div>
-                            {loanInfo.canBorrow ? (
+                            {loanInfo.borrowAmount === 0 ? (
                                 <>
-                                    <div className="loan-approved-badge"><Icon name="check" size={16} /> Loan Pre-Approved</div>
-                                    <div className="loan-plans">
-                                        <div className="loan-breakdown-title">Choose Repayment Plan</div>
-                                        <div className="loan-plan-grid">
-                                            {loanInfo.plans.map((plan, idx) => (
-                                                <button key={plan.months} className={`loan-plan-card ${selectedPlan === idx ? 'active' : ''}`} onClick={() => setSelectedPlan(idx)}>
-                                                    <div className="loan-plan-label">{plan.label}</div>
-                                                    <div className="loan-plan-months">{plan.months} mo</div>
-                                                    <div className="loan-plan-monthly">${plan.monthlyPayment.toFixed(2)}<span>/mo</span></div>
-                                                    <div className="loan-plan-details">
-                                                        <div className="text-xs text-muted">Total: ${plan.totalPayment.toFixed(2)}</div>
-                                                        <div className="text-xs" style={{ color: 'var(--accent)' }}>Interest: ${plan.totalInterest.toFixed(2)}</div>
-                                                    </div>
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </div>
+                                    <div className="loan-approved-badge"><Icon name="check" size={16} /> No Loan Needed — You have enough USDX</div>
                                     <button className="btn btn-primary w-full" onClick={executeLoanPurchase} disabled={loanProcessing} style={{ padding: '14px', fontSize: '1rem' }}>
-                                        {loanProcessing ? <><span className="loading"></span> Processing...</> : <>Borrow & Buy - ${loanProduct.price.toLocaleString()}</>}
+                                        {loanProcessing ? <><span className="loading"></span> Processing...</> : <>Buy Now with USDX - ${loanProduct.price.toLocaleString()}</>}
+                                    </button>
+                                </>
+                            ) : !loanInfo.canBorrow ? (
+                                <>
+                                    <div className="loan-denied-badge"><Icon name="warning" size={16} /> Deposit Collateral to Unlock Borrowing</div>
+                                    <div className="info-box warning" style={{ fontSize: '0.8rem' }}>
+                                        You need <strong>${loanInfo.borrowAmount.toFixed(2)} USDX</strong> but your borrowing limit is <strong>${availableToBorrow.toFixed(2)}</strong>.
+                                        Deposit collateral below to increase your limit.
+                                    </div>
+
+                                    {/* Inline deposit form */}
+                                    <div style={{ padding: 'var(--spacing-md)', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)' }}>
+                                        <div className="text-sm font-bold mb-sm">Quick Deposit Collateral</div>
+                                        <div className="flex gap-sm items-end">
+                                            <div style={{ flex: '0 0 90px' }}>
+                                                <label className="text-xs text-muted">Asset</label>
+                                                <select className="form-input" value={financeDepAsset} onChange={e => setFinanceDepAsset(e.target.value)} style={{ fontSize: '0.85rem', padding: '8px' }}>
+                                                    <option value="ETH">ETH</option>
+                                                    <option value="WBTC">WBTC</option>
+                                                    <option value="USDX">USDX</option>
+                                                </select>
+                                            </div>
+                                            <div style={{ flex: 1 }}>
+                                                <label className="text-xs text-muted">Amount</label>
+                                                <input type="number" className="form-input" placeholder="0.0" step="0.000001" value={financeDepAmount} onChange={e => setFinanceDepAmount(e.target.value)} style={{ fontSize: '0.85rem', padding: '8px' }} />
+                                            </div>
+                                            <button className="btn btn-primary btn-sm" onClick={handleFinanceDeposit} disabled={financeDepLoading} style={{ whiteSpace: 'nowrap', padding: '8px 16px' }}>
+                                                {financeDepLoading ? 'Depositing...' : 'Deposit'}
+                                            </button>
+                                        </div>
+                                        <div className="text-xs text-muted mt-sm">
+                                            Wallet: {parseFloat(financeDepAsset === 'ETH' ? balances.eth : financeDepAsset === 'WBTC' ? balances.wbtc : balances.usdx).toFixed(financeDepAsset === 'WBTC' ? 6 : financeDepAsset === 'ETH' ? 4 : 2)} {financeDepAsset}
+                                            {' '}<button type="button" onClick={() => {
+                                                const bal = financeDepAsset === 'ETH' ? Math.max(0, parseFloat(balances.eth) - 0.01) : financeDepAsset === 'WBTC' ? parseFloat(balances.wbtc) : parseFloat(balances.usdx);
+                                                setFinanceDepAmount(bal > 0 ? bal.toString() : '');
+                                            }} style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', fontWeight: 700, fontSize: '0.7rem' }}>MAX</button>
+                                        </div>
+                                        {(() => {
+                                            const depAmt = parseFloat(financeDepAmount) || 0;
+                                            if (depAmt <= 0) return null;
+                                            const depValueUSD = financeDepAsset === 'ETH' ? depAmt * prices.ethPrice : financeDepAsset === 'WBTC' ? depAmt * prices.wbtcPrice : depAmt;
+                                            const ltvPct = financeDepAsset === 'ETH' ? 0.60 : financeDepAsset === 'WBTC' ? 0.65 : 0.80;
+                                            const addedBorrowPower = depValueUSD * ltvPct;
+                                            const newAvailable = availableToBorrow + addedBorrowPower;
+                                            const willUnlock = newAvailable >= loanInfo.borrowAmount;
+                                            return (
+                                                <div className="text-xs mt-sm" style={{ padding: '6px 8px', background: willUnlock ? 'rgba(0,212,170,0.08)' : 'rgba(240,180,41,0.08)', borderRadius: 'var(--radius-md)', border: `1px solid ${willUnlock ? 'rgba(0,212,170,0.2)' : 'rgba(240,180,41,0.2)'}` }}>
+                                                    <div className="flex justify-between">
+                                                        <span className="text-muted">Added borrow power</span>
+                                                        <span className="mono font-bold" style={{ color: 'var(--primary)' }}>+${addedBorrowPower.toFixed(2)}</span>
+                                                    </div>
+                                                    <div className="flex justify-between">
+                                                        <span className="text-muted">New borrowing limit</span>
+                                                        <span className="mono font-bold" style={{ color: willUnlock ? 'var(--success)' : 'var(--warning)' }}>${newAvailable.toFixed(2)}</span>
+                                                    </div>
+                                                    {willUnlock && <div className="text-xs font-bold" style={{ color: 'var(--success)', marginTop: 4 }}>This deposit will unlock the loan for this item!</div>}
+                                                    {!willUnlock && <div className="text-xs" style={{ color: 'var(--warning)', marginTop: 4 }}>Still need ${(loanInfo.borrowAmount - newAvailable).toFixed(2)} more borrowing power</div>}
+                                                </div>
+                                            );
+                                        })()}
+                                    </div>
+
+                                    {/* Show plans preview even when can't borrow yet */}
+                                    {loanInfo.plans.length > 0 && (
+                                        <div className="loan-plans" style={{ opacity: 0.6 }}>
+                                            <div className="loan-breakdown-title">Repayment Plans (after deposit)</div>
+                                            <div className="loan-plan-grid">
+                                                {loanInfo.plans.map((plan, idx) => (
+                                                    <button key={plan.months} className={`loan-plan-card ${selectedPlan === idx ? 'active' : ''}`} onClick={() => setSelectedPlan(idx)}>
+                                                        <div className="loan-plan-label">{plan.label}</div>
+                                                        <div className="loan-plan-months">{plan.months} mo</div>
+                                                        <div className="loan-plan-monthly">${plan.monthlyPayment.toFixed(2)}<span>/mo</span></div>
+                                                        <div className="loan-plan-details">
+                                                            <div className="text-xs text-muted">Total: ${plan.totalPayment.toFixed(2)}</div>
+                                                            <div className="text-xs" style={{ color: 'var(--accent)' }}>Interest: ${plan.totalInterest.toFixed(2)}</div>
+                                                        </div>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <button className="btn btn-primary w-full" disabled style={{ padding: '14px', fontSize: '1rem', opacity: 0.5 }}>
+                                        Deposit Collateral Above to Unlock
                                     </button>
                                 </>
                             ) : (
                                 <>
-                                    <div className="loan-denied-badge"><Icon name="warning" size={16} /> Insufficient Collateral</div>
-                                    <div className="info-box info">
-                                        Need <strong>${loanInfo.borrowAmount.toFixed(2)}</strong> borrowing capacity, have <strong>${availableToBorrow.toFixed(2)}</strong>.
-                                        Deposit more collateral or apply for a general loan with collateral.
+                                    <div className="loan-approved-badge"><Icon name="check" size={16} /> Loan Pre-Approved</div>
+                                    <div className="info-box info" style={{ fontSize: '0.8rem' }}>
+                                        This will automatically borrow <strong>${loanInfo.borrowAmount.toFixed(2)} USDX</strong> and purchase the item in one transaction.
                                     </div>
-                                    <div className="flex gap-sm">
-                                        <Link to="/deposit" className="btn btn-primary" style={{ flex: 1, textAlign: 'center' }}>Deposit</Link>
-                                        <button className="btn btn-secondary" style={{ flex: 1 }}
-                                            onClick={() => { setLoanProduct(null); setLoanAmount(loanInfo.borrowAmount.toFixed(2)); openLoanApplication(); }}>
-                                            Apply for Loan
-                                        </button>
+                                    {loanInfo.plans.length > 0 && (
+                                        <div className="loan-plans">
+                                            <div className="loan-breakdown-title">Choose Repayment Plan</div>
+                                            <div className="loan-plan-grid">
+                                                {loanInfo.plans.map((plan, idx) => (
+                                                    <button key={plan.months} className={`loan-plan-card ${selectedPlan === idx ? 'active' : ''}`} onClick={() => setSelectedPlan(idx)}>
+                                                        <div className="loan-plan-label">{plan.label}</div>
+                                                        <div className="loan-plan-months">{plan.months} mo</div>
+                                                        <div className="loan-plan-monthly">${plan.monthlyPayment.toFixed(2)}<span>/mo</span></div>
+                                                        <div className="loan-plan-details">
+                                                            <div className="text-xs text-muted">Total: ${plan.totalPayment.toFixed(2)}</div>
+                                                            <div className="text-xs" style={{ color: 'var(--accent)' }}>Interest: ${plan.totalInterest.toFixed(2)}</div>
+                                                        </div>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                    <button className="btn btn-primary w-full" onClick={executeLoanPurchase} disabled={loanProcessing} style={{ padding: '14px', fontSize: '1rem' }}>
+                                        {loanProcessing ? <><span className="loading"></span> Processing...</> : <>Borrow ${loanInfo.borrowAmount.toFixed(2)} USDX & Buy</>}
+                                    </button>
+                                    <div className="text-xs text-muted text-center" style={{ marginTop: 'var(--spacing-sm)' }}>
+                                        Or <Link to="/borrow" style={{ color: 'var(--primary)' }}>go to Borrow page</Link> to borrow USDX manually first.
                                     </div>
                                 </>
                             )}
@@ -1332,6 +1455,7 @@ export default function Marketplace() {
                                                     <select className="form-input" value={depositAsset} onChange={e => setDepositAsset(e.target.value)} style={{ width: '120px' }}>
                                                         <option value="ETH">ETH</option>
                                                         <option value="WBTC">WBTC</option>
+                                                        <option value="USDX">USDX</option>
                                                     </select>
                                                     <input type="number" className="form-input mono" placeholder="0.0" step="0.001"
                                                         value={depositAmount} onChange={e => setDepositAmount(e.target.value)} />
@@ -1340,8 +1464,8 @@ export default function Marketplace() {
                                                     </button>
                                                 </div>
                                                 <div className="text-xs text-muted">
-                                                    Balance: {depositAsset === 'ETH' ? parseFloat(balances.eth).toFixed(4) : parseFloat(balances.wbtc).toFixed(6)} {depositAsset}
-                                                    {' | '}1 {depositAsset} = ${depositAsset === 'ETH' ? prices.ethPrice.toLocaleString() : prices.wbtcPrice.toLocaleString()}
+                                                    Balance: {parseFloat(depositAsset === 'ETH' ? balances.eth : depositAsset === 'WBTC' ? balances.wbtc : balances.usdx).toFixed(depositAsset === 'WBTC' ? 6 : depositAsset === 'ETH' ? 4 : 2)} {depositAsset}
+                                                    {depositAsset !== 'USDX' && <>{' | '}1 {depositAsset} = ${depositAsset === 'ETH' ? prices.ethPrice.toLocaleString() : prices.wbtcPrice.toLocaleString()}</>}
                                                 </div>
                                             </div>
                                         </>

@@ -13,7 +13,7 @@ COPY web/package.json web/package-lock.json* ./web/
 
 # Install dependencies
 RUN npm ci --ignore-scripts 2>/dev/null || npm install
-RUN cd web && npm ci 2>/dev/null || cd web && npm install
+RUN cd web && (npm ci 2>/dev/null || npm install)
 
 # Copy source code
 COPY . .
