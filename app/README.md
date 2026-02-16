@@ -1,6 +1,6 @@
 # CryptoCredit Bank
 
-A full-stack decentralized finance (DeFi) credit protocol built with Hardhat, React, and Express.js. Users can deposit crypto collateral, borrow USDX stablecoins, earn credit tiers through repayments, trade on a built-in exchange, and shop in a marketplace with crypto payments.
+A full-stack decentralized finance (DeFi) credit protocol built with Hardhat, React, and Express.js. Users can deposit multi-asset collateral (ETH, WBTC, USDX), borrow USDX/ETH/WBTC against their collateral, earn credit tiers through repayments, trade on a built-in DEX, and shop in a marketplace with crypto payments and asset-backed financing.
 
 ---
 
@@ -293,13 +293,36 @@ Five Solidity contracts deployed automatically:
 
 | Contract | Description | Key Functions |
 |----------|-------------|---------------|
-| **CreditProtocol.sol** | Core lending protocol | `depositETH`, `depositWBTC`, `borrowUSDX`, `repayUSDX`, `withdrawETH`, `withdrawWBTC`, `liquidatePosition` |
+| **CreditProtocol.sol** | Core multi-asset lending protocol | `depositETH`, `depositWBTC`, `depositUSDX`, `borrow`/`borrowETH`/`borrowWBTC`, `repay`/`repayETH`/`repayWBTC`, `withdrawETH`/`withdrawWBTC`/`withdrawUSDX`, `liquidate`, `getUserPosition`, `getUserDebts`, `getReserves` |
 | **USDX.sol** | Stablecoin (ERC-20) | Minted when users borrow, burned on repayment. Only the protocol can mint/burn |
 | **MockWBTC.sol** | Wrapped Bitcoin mock (ERC-20) | `faucet()` mints 1 WBTC per call for testing |
 | **MockPriceOracle.sol** | Price feed oracle | Returns ETH and WBTC prices (8 decimal precision) |
 | **SimpleSwap.sol** | DEX for token swaps | Swap between ETH, WBTC, and USDX |
 
 Contract addresses are automatically written to `web/src/config/contracts.js` during deployment.
+
+### Collateral Parameters
+
+| Asset | Loan-to-Value (LTV) | Liquidation Threshold | Type |
+|-------|---------------------|----------------------|------|
+| ETH | 60% | 75% | Native |
+| WBTC | 65% | 80% | ERC-20 |
+| USDX | 80% | 90% | ERC-20 (stablecoin) |
+
+- **Weighted LTV**: When multiple collateral types are deposited, the effective LTV is a weighted average based on each asset's USD value
+- **Credit Tier Bonus**: Higher tiers earn LTV bonuses (+0% Bronze, +5% Silver, +10% Gold)
+
+### Multi-Asset Borrowing
+
+Users can borrow any of the three supported assets:
+
+| Borrow Asset | Source | Repay With |
+|-------------|--------|------------|
+| USDX | Minted on demand (no reserve limit) | USDX (burned on repay) |
+| ETH | Protocol reserves (deposited by other users) | ETH |
+| WBTC | Protocol reserves (deposited by other users) | WBTC |
+
+Each borrowed asset creates a separate debt tracked independently. The protocol's `getUserDebts()` function returns all three debt balances.
 
 ---
 
@@ -309,22 +332,22 @@ Contract addresses are automatically written to `web/src/config/contracts.js` du
 
 | Page | Route | Description |
 |------|-------|-------------|
-| Dashboard | `/` | Position overview with health factor gauge, collateral breakdown, credit score, tier progress |
-| Deposit | `/deposit` | Deposit ETH or WBTC as collateral with supply APY projections |
-| Borrow | `/borrow` | Borrow USDX with loan agreement, fee breakdown, interest preview by tier |
-| Repay | `/repay` | Repay debt with amortization schedules (3/6/12 month plans) |
-| Withdraw | `/withdraw` | Withdraw collateral with health factor impact preview |
+| Dashboard | `/` | Position overview with health factor gauge, multi-asset collateral breakdown (ETH/WBTC/USDX), credit score, tier progress, marketplace asset collateral |
+| Deposit | `/deposit` | Deposit ETH, WBTC, or USDX as collateral with supply APY projections and collateral optimizer |
+| Borrow | `/borrow` | Borrow USDX, ETH, or WBTC against collateral with loan agreement, fee breakdown, interest preview by tier |
+| Repay | `/repay` | Repay USDX, ETH, or WBTC debt with amortization schedules (3/6/12 month plans) |
+| Withdraw | `/withdraw` | Withdraw ETH, WBTC, or USDX collateral with health factor impact preview |
 | Send | `/send` | Transfer tokens with address book integration and daily transfer limits |
-| Portfolio | `/portfolio` | Full account summary, net position, filterable transaction history, CSV export |
+| Portfolio | `/portfolio` | Full account summary, net position (crypto + marketplace assets - debt), filterable transaction history, CSV export |
 | Wallet Manager | `/wallets` | Create/import wallets, seed phrase recovery, Hardhat test accounts |
 | Market | `/market` | Live crypto prices and market data from oracle feeds |
 | Analytics | `/analytics` | Protocol-wide statistics, total value locked, user counts |
-| Liquidation | `/liquidation` | Discover and liquidate undercollateralized positions with bonus rewards |
+| Liquidation | `/liquidation` | Discover and liquidate undercollateralized positions with bonus rewards. Seize pledged marketplace assets |
 | Simulator | `/simulator` | Simulate borrow/repay scenarios with adjustable parameters |
-| Exchange | `/exchange` | Swap between ETH, WBTC, and USDX on the built-in DEX |
+| Exchange | `/exchange` | Swap between ETH, WBTC, and USDX on the built-in DEX with live rates |
 | Statements | `/statements` | Monthly account statements with PDF/CSV export |
 | Explorer | `/explorer` | Browse on-chain transactions, look up any address |
-| Marketplace | `/marketplace` | Buy assets, manage portfolio, pledge collateral, enforcement actions |
+| Marketplace | `/marketplace` | Buy assets with crypto or financing, manage portfolio, pledge assets as collateral, customer worth, enforcement |
 
 ### Credit Tier System
 
@@ -356,6 +379,7 @@ Interest is simulated on the frontend (smart contracts handle collateral/debt on
 **Supply Yield:**
 - ETH deposits earn 2.5% APY (simulated staking yield)
 - WBTC deposits earn 0.8% APY (simulated lending yield)
+- USDX deposits do not earn yield (stablecoin collateral only)
 
 ### Credit Score
 
@@ -385,10 +409,17 @@ Score ranges: Excellent (750-850), Good (700-749), Fair (650-699), Poor (550-649
 | Electronics | iPhone, MacBook Pro | -20-40%/yr | 20% |
 
 **Tabs:**
-- **Shop** - Browse and purchase items
-- **My Assets** - View owned items with live valuations and appreciation/depreciation
-- **Customer Worth** - Net worth breakdown (crypto + assets - debt) with risk scoring
+- **Shop** - Browse and purchase items with USDX, ETH, or WBTC. Finance purchases by borrowing USDX inline (deposit collateral and borrow directly from the finance modal)
+- **My Assets** - View owned items with live valuations and appreciation/depreciation. Pledge assets as additional collateral
+- **Customer Worth** - Net worth breakdown (crypto + assets - debt) with risk scoring (0-100)
 - **Enforcement** - Asset seizure, legal claims, settlements for defaulted positions
+
+**Financing:**
+- Items can be financed with a loan directly from the marketplace
+- If you have enough USDX balance, no loan is needed (direct purchase)
+- If you need to borrow, the finance modal shows repayment plans (3/6/12 months)
+- If you don't have enough collateral, you can deposit ETH/WBTC/USDX directly from the finance modal
+- Live borrow power preview shows how much deposit unlocks
 
 ### Exchange (DEX)
 
