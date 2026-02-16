@@ -1,0 +1,42 @@
+node_modules
+.env
+coverage
+coverage.json
+typechain
+typechain-types
+
+# Hardhat files
+cache
+artifacts
+
+# Backend
+backend/node_modules
+backend/.env
+
+# Mobile
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.packages
+mobile/build/
+mobile/ios/Pods/
+mobile/android/.gradle/
+mobile/android/app/build/
+
+# Web
+web/node_modules
+web/build
+web/dist
+web/.env.local
+web/.env.production.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Claude Code
+.claude/

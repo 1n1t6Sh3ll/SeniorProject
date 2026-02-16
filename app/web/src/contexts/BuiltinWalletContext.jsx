@@ -1,0 +1,47 @@
+import { createContext, useContext, useState, useEffect } from 'react';
+
+const BuiltinWalletContext = createContext(null);
+
+const STORAGE_KEY = 'cryptocredit_active_builtin';
+
+export function BuiltinWalletProvider({ children }) {
+  const [wallet, setWallet] = useState(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) return JSON.parse(stored);
+    } catch {}
+    return null;
+  });
+
+  const isBuiltinConnected = !!wallet;
+
+  const connectBuiltin = (w) => {
+    const data = { address: w.address, privateKey: w.privateKey, name: w.name || 'Built-in Wallet' };
+    setWallet(data);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  };
+
+  const disconnectBuiltin = () => {
+    setWallet(null);
+    localStorage.removeItem(STORAGE_KEY);
+  };
+
+  return (
+    <BuiltinWalletContext.Provider value={{
+      address: wallet?.address || null,
+      privateKey: wallet?.privateKey || null,
+      name: wallet?.name || null,
+      isBuiltinConnected,
+      connectBuiltin,
+      disconnectBuiltin,
+    }}>
+      {children}
+    </BuiltinWalletContext.Provider>
+  );
+}
+
+export function useBuiltinWallet() {
+  const ctx = useContext(BuiltinWalletContext);
+  if (!ctx) throw new Error('useBuiltinWallet must be used within BuiltinWalletProvider');
+  return ctx;
+}

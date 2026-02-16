@@ -1,0 +1,24 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"   # Frontend + API
+      - "8545:8545"   # Hardhat RPC (for MetaMask)
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    restart: unless-stopped
+
+  # Optional MongoDB - enable with: docker compose --profile with-db up
+  mongodb:
+    image: mongo:7
+    profiles: [with-db]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      - MONGO_INITDB_DATABASE=crypto-credit
+
+volumes:
+  mongo_data:

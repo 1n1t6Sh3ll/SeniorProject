@@ -1,0 +1,12 @@
+{
+  "network": "localhost",
+  "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "timestamp": "2026-02-16T16:34:22.382Z",
+  "contracts": {
+    "USDX": "0x59b670e9fA9D0A427751Af201D676719a970857b",
+    "MockWBTC": "0x4ed7c70F96B99c776995fB64377f0d4aB3B0e1C1",
+    "PriceOracle": "0x322813Fd9A801c5507c9de605d63CEA4f2CE6c44",
+    "CreditProtocol": "0x4A679253410272dd5232B3Ff7cF5dbB88f295319",
+    "SimpleSwap": "0x09635F643e140090A9A8Dcd712eD6285858ceBef"
+  }
+}
