@@ -761,8 +761,3 @@ Use the WBTC faucet on the Deposit page (or in the Wallet Manager) to mint 1 WBT
 - Interest, fees, and credit scores are frontend simulations
 - Marketplace purchases are stored in browser localStorage
 
----
-
-## License
-
-ISC
