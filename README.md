@@ -2,6 +2,7 @@
 
 A full-stack decentralized finance (DeFi) credit protocol built with Hardhat, React, and Express.js. Users can deposit multi-asset collateral (ETH, WBTC, USDX), borrow USDX/ETH/WBTC against their collateral, earn credit tiers through repayments, trade on a built-in DEX, and shop in a marketplace with crypto payments and asset-backed financing.
 
+[VIDEO-DEMO](https://fduedu-my.sharepoint.com/:v:/g/personal/d_khurana_student_fdu_edu/IQCynBmA6GGsQJilpu_jIn9_ASZqi-uIVnZVN5l2f1AINAo)
 ---
 
 ## Table of Contents
